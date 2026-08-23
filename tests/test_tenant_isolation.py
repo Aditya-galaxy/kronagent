@@ -396,3 +396,53 @@ def test_slack_refuses_when_no_signing_secret_is_configured(connect_api) -> None
     r = client.post("/api/slack/interactive", content=b"payload=%7B%7D")
     assert r.status_code == 503
     assert "SIGNING_SECRET" in r.json()["detail"]
+
+
+def test_verify_requires_authorization(connect_api) -> None:
+    """`verify` is not a read: it performs a real STS AssumeRole into the
+    customer's account, mutates the stored connection state and writes an audit
+    record. It had no authorization at all, so an anonymous caller could make
+    Kronagent exercise any tenant's credentials on demand — and a scoped
+    operator could do it to another tenant."""
+    client, _ = connect_api
+
+    anonymous = client.post("/api/connections/acme/verify", json={"grant": "observe"})
+    assert anonymous.status_code == 403
+
+    cross_tenant = client.post("/api/connections/acme/verify", json={
+        "grant": "observe", "operator_id": "evil-admin", "token": "evil-tok"})
+    assert cross_tenant.status_code == 403
+
+
+def test_every_tenant_scoped_endpoint_is_authorized() -> None:
+    """The durable fix, rather than one more patched endpoint.
+
+    `verify` was missed by an audit that fixed its siblings, and no test caught
+    it because none covered its auth. This scans the router for any handler that
+    touches a tenant without going through one of the authorization helpers, so
+    the next endpoint cannot repeat it.
+
+    If this fails for a new endpoint, route it through `tenant_scope()` (reads)
+    or `_require()` (mutations) rather than relaxing the check.
+    """
+    import re
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent.parent / "kronagent" / "web.py"
+    blocks = re.split(r'\n(?=@app\.(?:get|post|put|delete|patch)\()', source.read_text())
+
+    guards = ("tenant_scope(", "authorize_tenant(", "_may_access_tenant(",
+              "_require(", "may_access(")
+    unguarded = []
+    for block in blocks:
+        m = re.match(r'@app\.\w+\("([^"]+)"', block)
+        if not m:
+            continue
+        path = m.group(1)
+        touches_tenant = "tenant_id" in block or "{tenant_id}" in path
+        if touches_tenant and not any(g in block for g in guards):
+            unguarded.append(path)
+
+    assert not unguarded, (
+        f"these endpoints resolve a tenant without authorizing it: {unguarded}"
+    )
