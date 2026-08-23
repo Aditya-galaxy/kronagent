@@ -1364,7 +1364,16 @@ async def record_connection_role(tenant_id: str, req: RecordRoleRequest) -> dict
 
 @app.post("/api/connections/{tenant_id}/verify")
 async def verify_connection(tenant_id: str, req: VerifyRequest) -> dict[str, Any]:
-    """Assume the role and probe it, then record what came back."""
+    """Assume the role and probe it, then record what came back.
+
+    Authorised like its siblings, which it previously was not — `VerifyRequest`
+    already carried operator_id and token, but nothing read them. This is not a
+    read: it performs a real STS AssumeRole into the customer's account, mutates
+    the stored connection state, and writes an audit record, so an anonymous
+    caller could make Kronagent exercise any tenant's credentials on demand.
+    """
+    await _require(Permission.PROMOTE, req, tenant_id, "web_connect_verify",
+                   grant=req.grant)
     conn = connection_store.get(tenant_id)
     if conn is None:
         raise HTTPException(status_code=404, detail=f"no connection for tenant '{tenant_id}'")
