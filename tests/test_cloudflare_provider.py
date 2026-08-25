@@ -71,5 +71,14 @@ async def test_cloudflare_containment_adapter_dry_run() -> None:
     assert "firewall/access_rules" in api_calls[0]
     assert "DELETE" in rollback
 
-    detail_res, rollback_res = await adapter.perform(action)
+    # perform() is the LIVE path — dry-run never reaches it, the executor
+    # short-circuits first. This previously asserted that an unconfigured
+    # adapter returns success, which is exactly the defect: it made no API call
+    # and the executor recorded "EXECUTED — block remote IP ..." into the
+    # hash-chained audit log while the address stayed reachable.
+    with pytest.raises(NotImplementedError, match="was NOT performed"):
+        await adapter.perform(action)
+
+    # The simulation remains available to tests that want it, explicitly.
+    detail_res, _ = await CloudflareContainmentAdapter(simulate=True).perform(action)
     assert "block remote IP 203.0.113.88" in detail_res

@@ -103,13 +103,31 @@ def plan_cloudflare_actions(finding: Finding) -> list[ProposedAction]:
 
 
 class CloudflareContainmentAdapter:
-    """Containment execution adapter for Cloudflare Edge WAF IP Access Rules."""
+    """Plans Cloudflare Edge WAF IP Access Rules. Live execution is NOT implemented.
+
+    `perform()` used to call `plan()` and return its human-readable summary
+    without making any API call. The executor saw no exception and recorded
+    `executed=True` with "EXECUTED - block remote IP ... on Cloudflare global
+    edge network firewall" into the hash-chained audit log, so an attacker's IP
+    stayed reachable while the platform certified, in signed compliance
+    evidence, that it had been blocked.
+
+    This is the same defect that was fixed in `gcp.py`, reappearing in a
+    provider added afterwards, so the guard is expressed the same way here: live
+    execution refuses, and `simulate=True` restores the old behaviour for tests
+    only. `build_containment_adapters` leaves it at the default.
+
+    Planning is unaffected - `plan()` is pure and honest, so dry-run still shows
+    exactly the API calls a real implementation would make.
+    """
 
     provider: str = PROVIDER
 
-    def __init__(self, api_token: str = "", zone_id: str = "") -> None:
+    def __init__(self, api_token: str = "", zone_id: str = "", *,
+                 simulate: bool = False) -> None:
         self.api_token = api_token
         self.zone_id = zone_id
+        self._simulate = simulate
 
     def plan(self, action: ProposedAction) -> tuple[list[str], str, str]:
         """Pure computation of API calls, rollback, and human summary."""
@@ -126,6 +144,16 @@ class CloudflareContainmentAdapter:
         return ([f"# no cloudflare planner for {action.action_class.value}"], "unknown", f"unhandled action {action.action_class.value}")
 
     async def perform(self, action: ProposedAction) -> tuple[str, str]:
-        """Execute Cloudflare containment action."""
+        """Refuse rather than report a containment that did not happen.
+
+        The executor catches this and records EXECUTION FAILED, so an operator
+        can see the IP is still reachable and act on it.
+        """
         calls, rollback, detail = self.plan(action)
+        if not self._simulate:
+            raise NotImplementedError(
+                f"live Cloudflare execution for {action.action_class.value} is not "
+                f"implemented - the action was NOT performed. Plan it in dry-run, or "
+                f"block this address by another route."
+            )
         return detail, rollback
