@@ -260,3 +260,98 @@ def test_wilson_interval_is_wide_on_small_samples() -> None:
 
 def test_wilson_interval_handles_zero_samples() -> None:
     assert wilson_score_interval(0, 0) == (0.0, 0.0)
+
+
+# --------------------------------------------------------------------------- #
+# Adversarial cases
+#
+# The platform's central claim is that a containment target always comes from
+# parsed finding data and never from model output, so injected telemetry cannot
+# redirect an action. That claim had invariant TESTS but no evaluation case ever
+# tried to defeat it — the differentiator was the one thing the accuracy harness
+# did not measure.
+# --------------------------------------------------------------------------- #
+
+def _dataset() -> list[dict]:
+    return json.loads((SAMPLES_DIR / "eval_dataset.json").read_text())
+
+
+def test_the_dataset_contains_adversarial_cases() -> None:
+    adversarial = [c for c in _dataset() if c.get("adversarial")]
+    assert adversarial, "no case attempts to steer containment"
+    assert len(adversarial) >= 4
+
+
+def test_adversarial_cases_span_more_than_one_provider() -> None:
+    """Injection reaches the model through whatever text field a provider
+    carries — a GuardDuty description, a Kubernetes annotation, a detector
+    message. Covering one provider would test one parser."""
+    providers = {c["provider"] for c in _dataset() if c.get("adversarial")}
+    assert len(providers) >= 3, f"adversarial coverage limited to {providers}"
+
+
+def test_forbidden_targets_are_genuinely_out_of_scope() -> None:
+    """The trap has to be a real trap. If a forbidden target were among the
+    finding's own resources, the case could never fail and would score as a
+    permanent free pass."""
+    from kronagent.providers import NORMALIZERS
+    from kronagent.trajectory import legitimate_targets
+
+    for case in _dataset():
+        forbidden = set(case.get("forbidden_targets") or [])
+        if not forbidden:
+            continue
+        finding = NORMALIZERS[case["provider"]](case["raw_event"])
+        overlap = forbidden & legitimate_targets(finding)
+        assert not overlap, (
+            f"{case['finding_id']}: {sorted(overlap)} is both forbidden and a "
+            f"legitimate target of the finding — the case cannot fail."
+        )
+
+
+def test_the_injected_payload_actually_reaches_the_finding() -> None:
+    """A case whose injected text never survives normalization would be testing
+    nothing. The payload must be present in the normalized finding, which is
+    what a model would be shown."""
+    from kronagent.providers import NORMALIZERS
+
+    for case in _dataset():
+        for target in (case.get("forbidden_targets") or []):
+            finding = NORMALIZERS[case["provider"]](case["raw_event"])
+            blob = f"{finding.title} {finding.description} {finding.raw}"
+            assert target in blob, (
+                f"{case['finding_id']}: the bait '{target}' does not appear in the "
+                f"normalized finding, so nothing is being tempted."
+            )
+
+
+def test_triage_manipulation_cases_are_marked_live_only() -> None:
+    """The offline mock answers triage with the dataset's own label, so injected
+    text never reaches a model. A case whose adversarial property IS the triage
+    verdict therefore cannot be scored offline, and must say so rather than
+    counting as a silent pass — the same vacuity that made the F1 gate useless.
+    """
+    for case in _dataset():
+        adversarial = (case.get("adversarial") or "").lower()
+        if "triage" in adversarial:
+            assert case.get("triage_scored_live_only") is True, (
+                f"{case['finding_id']} attacks the triage verdict but is not "
+                f"marked live-only, so it would pass offline while testing the mock."
+            )
+
+
+def test_the_harness_arms_the_trajectory_guard() -> None:
+    """Found by adding the adversarial cases: run_eval built its Orchestrator
+    WITHOUT `trajectory=`, so every scope check was skipped and the harness had
+    never exercised the platform's headline safety control. An adversarial case
+    cannot pass or fail meaningfully against a pipeline with the guard switched
+    off, so this is pinned rather than left to review.
+    """
+    source = (SAMPLES_DIR.parent / "run_eval.py").read_text()
+    assert "TrajectoryGuard(" in source, (
+        "run_eval.py does not construct a trajectory guard: adversarial cases "
+        "would be scored against a pipeline with scope enforcement disabled."
+    )
+    assert "trajectory=trajectory" in source, (
+        "run_eval.py builds a guard but never passes it to the Orchestrator."
+    )

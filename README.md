@@ -130,28 +130,149 @@ graph TD
 
 ---
 
-## Quickstart
+## Getting started
+
+Three steps, in order. Each one is useful on its own, and nothing you do in
+step 1 or 2 can touch your infrastructure.
+
+### 1. See it work — 2 minutes, no cloud account, no API key
 
 ```bash
 python3 -m pip install -r requirements.txt
-cp .env.example .env        # add GEMINI_API_KEY for LLM-enriched triage (optional — degrades gracefully)
-
-python3 run_slice.py                                   # replay both providers' sample findings
-python3 run_slice.py kubernetes samples/k8s_audit_events.json   # replay one provider
-
-python3 run_preflight.py                                # is this deployment safe to arm?
-python3 promote.py list                                 # inspect the auto-execute allowlist
-python3 promote.py review --by alice                    # periodic re-earn-it review (--strict for cron)
-python3 promote.py warn-expiring --dry-run              # who'd be warned that their entry is lapsing
-python3 approve.py list                                 # inspect pending human approvals
-python3 run_compliance_report.py                        # generate EU AI Act Article 12/14 report
-python3 run_compliance_report.py --markdown-output rep.md # export a styled Markdown manifest
-
+python3 run_slice.py
 ```
 
-Everything above runs in **dry-run** by default (`KRONAGENT_DRY_RUN=true`) — no
-cloud or cluster is touched. Findings are read from `samples/` with no AWS
-account required.
+That replays real-schema sample findings through the whole pipeline: triage,
+threat intel, correlation, forensics, policy, containment planning, audit. Watch
+the `[POLICY]` lines — reversible single-resource actions are marked `AUTO`,
+destructive ones `APPROVAL`.
+
+Everything runs in **dry-run** (`KRONAGENT_DRY_RUN=true` is the default). No
+cloud or cluster is contacted, and no credentials are needed. An LLM key is
+optional — without `GEMINI_API_KEY` the pipeline falls back to deterministic
+triage and keeps working.
+
+Then open the console:
+
+```bash
+python3 run_console.py          # http://127.0.0.1:8000
+```
+
+```bash
+python3 approve.py list         # the actions waiting for a human
+python3 promote.py list         # the auto-execute allowlist (empty on a cold start)
+```
+
+### 2. Point it at your own AWS account — read-only, nothing executes
+
+This grants Kronagent a **read-only** role. It can ingest, triage and
+investigate; it is structurally incapable of changing anything, because it does
+not hold the permissions. Containment is a separate, later grant.
+
+**Set the one variable the connect flow needs** — the account Kronagent itself
+runs in, which the customer's trust policy will point at:
+
+```bash
+export KRONAGENT_AWS_ACCOUNT_ID=<your-12-digit-account-id>
+python3 run_console.py
+```
+
+Register the account you want to protect, and fetch its CloudFormation template.
+The template carries a per-tenant **External ID**, which is what stops another
+Kronagent customer tricking us into assuming your role:
+
+```bash
+curl -sX POST localhost:8000/api/connections -H 'content-type: application/json' \
+  -d '{"tenant_id":"default","account_id":"<account-to-protect>","region":"us-east-1","operator_id":"you","token":""}'
+
+curl -s localhost:8000/api/connections/default/template/observe \
+  | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["template"], indent=2))' \
+  > kronagent-observe.json
+```
+
+Deploy it **in the account you are protecting**, then hand the role ARN back:
+
+```bash
+aws cloudformation deploy --template-file kronagent-observe.json \
+  --stack-name kronagent-observe --capabilities CAPABILITY_NAMED_IAM
+
+ROLE=$(aws cloudformation describe-stacks --stack-name kronagent-observe \
+  --query 'Stacks[0].Outputs[?OutputKey==`RoleArn`].OutputValue' --output text)
+
+curl -sX POST localhost:8000/api/connections/default/role -H 'content-type: application/json' \
+  -d "{\"grant\":\"observe\",\"role_arn\":\"$ROLE\",\"operator_id\":\"you\",\"token\":\"\"}"
+
+curl -sX POST localhost:8000/api/connections/default/verify -H 'content-type: application/json' \
+  -d '{"grant":"observe","operator_id":"you","token":""}'
+```
+
+`verify` assumes the role for real and probes the permissions. It reports
+`healthy`, `degraded` (assumed, but some permissions missing) or `failed`
+(could not assume) — it does not guess.
+
+Once a connection is `healthy`, start the pipeline. **Nothing else to
+configure:**
+
+```bash
+python3 run_slice.py
+```
+
+It polls GuardDuty through the role you granted — no queue, no EventBridge rule,
+no environment variable — because the observe role already carries
+`guardduty:ListFindings`/`GetFindings`. Findings appear within one poll interval
+(`KRONAGENT_GUARDDUTY_POLL_SECONDS`, default 60). Every action is planned and
+audited; none execute.
+
+> The `/api/connect/aws/link` endpoint returns a one-click CloudFormation URL,
+> but it points at a template bucket that is **not published yet**, so the link
+> opens a console that cannot load the template. Use the steps above until that
+> ships.
+
+### 3. Let it act
+
+Two independent gates stand between a plan and an action, and you control both.
+
+**Approve one action at a time** — this works today, in dry-run:
+
+```bash
+python3 approve.py list
+python3 approve.py approve <request-id> --by you --reason "confirmed compromise"
+```
+
+**Or grant one action class standing autonomy.** Trust is earned per class, is
+audited, and takes effect with no restart:
+
+```bash
+python3 promote.py add disable_access_key \
+  --by you --reason "30 days incident-free; reversible, single-credential blast radius"
+```
+
+Destructive actions — terminate an instance, delete a pod, scale to zero — can
+**never** be promoted into autonomy. The policy table is a hard ceiling, not a
+default: allowlisting one by mistake has no effect.
+
+**Before you ever set `KRONAGENT_DRY_RUN=false`, run the pre-flight:**
+
+```bash
+python3 run_preflight.py        # exit 0 = safe to arm, 2 = fix this first
+```
+
+It catches the misconfiguration that is invisible in dry-run — an action class
+that is allowlisted but has no quarantine target configured. In dry-run that
+renders as a placeholder in the planned call and is never sent; live, the call
+goes out malformed, and you find out mid-incident.
+
+### If something does not work
+
+| Symptom | Cause |
+|---|---|
+| `503 KRONAGENT_AWS_ACCOUNT_ID is not configured` | Step 2's export is missing. A template without it produces a role nobody can assume. |
+| Connection stuck at `pending` | The role ARN was never posted back. Re-run the `/role` call. |
+| `verify` returns `failed` | The role could not be assumed — usually a wrong External ID or a stack deployed in the wrong account. |
+| `verify` returns `degraded` | Role assumed, but permissions are missing; the response lists which. |
+| Connected and `healthy`, but no findings | GuardDuty may have nothing recent. Generate samples: `aws guardduty create-sample-findings --detector-id <id> --finding-types Recon:EC2/PortProbeUnprotectedPort` |
+| Triage says "LLM disabled" | No `GEMINI_API_KEY`. Expected — the pipeline degrades to deterministic triage. |
+| Everything says `DRY-RUN` | Correct. That is the default and it is deliberate. |
 
 ### Live terminal demo
 
@@ -166,23 +287,6 @@ live (no restart) → human approval before execution → tamper-evident audit
 (including a live tamper-detection demonstration). If the local SQS testbed
 is installed, it also runs the *live* async ingestion path against a real
 queue.
-
-### Connect an AWS account (the shortest path to real findings)
-
-```bash
-docker compose up                 # nothing else configured
-python3 run_preflight.py          # exit 0 = safe to point at production
-# then in the console: Connect AWS -> launch stack -> verify
-```
-
-That is the whole setup. A connection in `healthy` state starts polling
-GuardDuty through the role you granted — **no queue, no EventBridge rule and no
-environment variable**, because the observe role already carries
-`guardduty:ListFindings`/`GetFindings`. Findings appear within one poll interval
-(`KRONAGENT_GUARDDUTY_POLL_SECONDS`, default 60) and every action is dry-run
-until an operator promotes an action class.
-
-Use the SQS path below instead when seconds matter rather than minutes.
 
 ### Live SQS ingestion — no AWS account needed
 
@@ -199,22 +303,6 @@ python3 run_slice.py                             # long-polls and processes find
 See [`testbed/README.md`](testbed/README.md) for the full setup, including the
 Docker/ElasticMQ alternative and the reasoning behind choosing moto over
 LocalStack.
-
-### Governance — promoting an action class to autonomy
-
-```bash
-python3 promote.py add disable_access_key \
-  --by alice --reason "30 days incident-free; reversible, single-credential blast radius"
-
-python3 run_slice.py    # disable_access_key now auto-executes (still dry-run); destructive actions stay gated
-```
-
-### Approving a gated action
-
-```bash
-python3 approve.py list
-python3 approve.py approve <request-id> --by alice --reason "confirmed compromise; isolate for forensics"
-```
 
 ### Going live against real infrastructure
 
