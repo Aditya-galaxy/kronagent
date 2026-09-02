@@ -104,6 +104,13 @@ class Settings:
     # responsiveness (an in-flight long-poll can't be interrupted by the stop
     # signal, so this bounds shutdown latency) — the testbed/demo use ~2.
     sqs_wait_seconds: int = 20
+    # How often to poll GuardDuty through a connected tenant's assumed role.
+    # Polling is the zero-provisioning ingestion path: the observe role already
+    # grants ListFindings/GetFindings, so a verified connection starts producing
+    # findings with no queue, rule or IAM beyond what the customer already
+    # granted. 60s trades latency for that, which is the right call in shadow
+    # mode; use the SQS path when seconds matter.
+    guardduty_poll_seconds: float = 60.0
 
     # --- Kubernetes ---
     # Empty kubeconfig_path uses the default resolution (KUBECONFIG / ~/.kube/config
@@ -211,6 +218,7 @@ class Settings:
             quarantine_nacl_id=os.getenv("KRONAGENT_QUARANTINE_NACL_ID", ""),
             sqs_endpoint_url=os.getenv("KRONAGENT_SQS_ENDPOINT_URL", ""),
             sqs_wait_seconds=int(os.getenv("KRONAGENT_SQS_WAIT_SECONDS", "20")),
+            guardduty_poll_seconds=float(os.getenv("KRONAGENT_GUARDDUTY_POLL_SECONDS", "60")),
             kubeconfig_path=os.getenv("KRONAGENT_KUBECONFIG", ""),
             kube_context=os.getenv("KRONAGENT_KUBE_CONTEXT", ""),
             azure_subscription_id=os.getenv("KRONAGENT_AZURE_SUBSCRIPTION_ID", ""),
@@ -249,6 +257,11 @@ class Settings:
     def validate(self) -> list[str]:
         """Validate configuration settings and return a list of actionable error strings."""
         errors: list[str] = []
+        if self.guardduty_poll_seconds < 5:
+            errors.append(
+                f"KRONAGENT_GUARDDUTY_POLL_SECONDS ({self.guardduty_poll_seconds}) must be "
+                f"at least 5 — GuardDuty is rate-limited and a tighter loop would "
+                f"throttle the customer's account.")
         if self.sqs_wait_seconds < 0 or self.sqs_wait_seconds > 20:
             errors.append(f"KRONAGENT_SQS_WAIT_SECONDS ({self.sqs_wait_seconds}) must be between 0 and 20.")
         if self.min_severity_for_containment < 0.0 or self.min_severity_for_containment > 10.0:
