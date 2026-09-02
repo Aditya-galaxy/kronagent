@@ -167,6 +167,23 @@ live (no restart) → human approval before execution → tamper-evident audit
 is installed, it also runs the *live* async ingestion path against a real
 queue.
 
+### Connect an AWS account (the shortest path to real findings)
+
+```bash
+docker compose up                 # nothing else configured
+python3 run_preflight.py          # exit 0 = safe to point at production
+# then in the console: Connect AWS -> launch stack -> verify
+```
+
+That is the whole setup. A connection in `healthy` state starts polling
+GuardDuty through the role you granted — **no queue, no EventBridge rule and no
+environment variable**, because the observe role already carries
+`guardduty:ListFindings`/`GetFindings`. Findings appear within one poll interval
+(`KRONAGENT_GUARDDUTY_POLL_SECONDS`, default 60) and every action is dry-run
+until an operator promotes an action class.
+
+Use the SQS path below instead when seconds matter rather than minutes.
+
 ### Live SQS ingestion — no AWS account needed
 
 ```bash
@@ -287,7 +304,7 @@ demo_trajectory.py     adversarial trajectory-guard walkthrough
 testbed/               local SQS emulator (no AWS account, no Docker)
 deploy/                IAM policies, CloudFormation/Bicep/Terraform launch templates, Kubernetes Helm chart
 samples/                real-schema sample findings (AWS, Azure, Cloudflare, GCP, K8s, on-prem)
-tests/                 657 tests, offline, ~25s
+tests/                 670 tests, offline, ~25s
 ```
 
 ---
@@ -299,7 +316,7 @@ python3 -m pip install -r requirements-dev.txt
 python3 -m pytest -q
 ```
 
-657 fully offline, deterministic unit and integration tests passing cleanly. Coverage highlights: the policy engine's safety ceiling (destructive actions proven to never auto-execute, even if allowlisted), the audit log's tamper-evidence (mutation-tested, not just asserted), the behavioral-trajectory guard (scope integrity, runaway rate, and latching — all with injected clocks rather than sleeps), a **cross-provider scope invariant** asserting that every planned action, for every provider, targets a resource its finding actually implicates (mutation-tested against a real defect this caught in the GCP planner), the approval-provider round-trip, forensics-before-containment ordering (mutation-tested), live ingestion against a real SQS server, SQLite/PostgreSQL-backed storage engine persistence, self-serve cloud connection web APIs (`/api/connect/...`), real-time SSE event stream (`/api/events/stream`), OCSF SIEM export (`/api/export/siem`), **cross-tenant isolation at the HTTP boundary** (an operator of one tenant proven unable to read or approve another's containment — mutation-tested), a **cross-provider execution-honesty invariant** proving no adapter can report a containment it did not perform (mutation-tested against real defects in both the GCP and Cloudflare adapters), and EU AI Act compliance report generation.
+670 fully offline, deterministic unit and integration tests passing cleanly. Coverage highlights: the policy engine's safety ceiling (destructive actions proven to never auto-execute, even if allowlisted), the audit log's tamper-evidence (mutation-tested, not just asserted), the behavioral-trajectory guard (scope integrity, runaway rate, and latching — all with injected clocks rather than sleeps), a **cross-provider scope invariant** asserting that every planned action, for every provider, targets a resource its finding actually implicates (mutation-tested against a real defect this caught in the GCP planner), the approval-provider round-trip, forensics-before-containment ordering (mutation-tested), live ingestion against a real SQS server, SQLite/PostgreSQL-backed storage engine persistence, self-serve cloud connection web APIs (`/api/connect/...`), real-time SSE event stream (`/api/events/stream`), OCSF SIEM export (`/api/export/siem`), **cross-tenant isolation at the HTTP boundary** (an operator of one tenant proven unable to read or approve another's containment — mutation-tested), a **cross-provider execution-honesty invariant** proving no adapter can report a containment it did not perform (mutation-tested against real defects in both the GCP and Cloudflare adapters), the **onboarding funnel** (a verified connection starts GuardDuty polling by itself, findings carry their tenant, and the pipeline brokers the customer's assumed role — each guarded by an invariant, mutation-tested), and EU AI Act compliance report generation.
 
 ---
 
@@ -322,7 +339,7 @@ This is a fully functional, enterprise-ready vertical slice:
 - **Behavioral-Trajectory Guard**: A deterministic automatic kill switch over Kronagent's *own* action stream — scope-integrity enforcement (an action may only target a resource its finding implicates) plus a runaway-rate limiter that latches a platform-wide halt. The halt is **persisted**, so it survives a process restart rather than being silently released by one, and is released only by an audited, admin-gated `halt.py clear` — which a running orchestrator observes immediately, with no restart.
 - **Enterprise Isolation & Web Console**: Multi-tenant business-unit isolation with operators scoped to tenants (an operator may only read or act on tenants their registry entry grants; `*` for platform/MSSP operators), single-page Analyst Web Console (`run_console.py`), and OCSF SIEM exporter (`run_siem_export.py`).
 - **Security & Integrity**: Cryptographic agent-to-agent non-repudiation signatures, `Permission.VIEW` REST endpoint access control, target-preservation sanitization, and continuous chaos rollback validation (`run_cloud_drill.py`).
-- **Test Suite**: 657 fully offline, deterministic unit and integration tests passing cleanly.
+- **Test Suite**: 670 fully offline, deterministic unit and integration tests passing cleanly.
 
 ### Live containment execution by provider
 

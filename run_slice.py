@@ -45,7 +45,13 @@ from kronagent.commander import IncidentCommanderAgent
 from kronagent.containment import ContainmentExecutor
 from kronagent.correlation import CorrelationAgent
 from kronagent.forensics import ForensicsAgent
-from kronagent.ingestion import FileReplaySource, QueuedFinding, SqsFindingSource
+from kronagent.connect import ConnectionState, ConnectionStore, CredentialBroker, Grant
+from kronagent.ingestion import (
+    FileReplaySource,
+    GuardDutyPollingSource,
+    QueuedFinding,
+    SqsFindingSource,
+)
 from kronagent.intel import ThreatIntelAgent
 from kronagent.llm import GeminiTriageClient, LLMUnavailableError
 from kronagent.orchestrator import Orchestrator, _log
@@ -59,6 +65,15 @@ _DEFAULT_REPLAY: list[tuple[str, str]] = [
     ("aws", "samples/guardduty_findings.json"),
     ("kubernetes", "samples/k8s_audit_events.json"),
 ]
+
+
+async def _stream_all(sources, queue, stop) -> None:
+    """Run several live sources concurrently onto the shared queue.
+
+    One source per connected tenant. gather() so a single tenant's transient
+    failure cannot stall the others — each source already backs off internally.
+    """
+    await asyncio.gather(*(s.stream(queue, stop) for s in sources))
 
 
 async def _replay_files(sources, queue, stop) -> None:
@@ -91,7 +106,26 @@ async def main(replay: list[tuple[str, str]]) -> int:
     commander = IncidentCommanderAgent(llm)  # synthesis + escalation (advisory)
     forensics = ForensicsAgent(settings)     # deterministic evidence + chain of custody
     policy = PolicyEngine(settings, allowlist)
-    containment = ContainmentExecutor(settings, build_containment_adapters(settings))
+    # Containment runs inside the CUSTOMER's account, under the role they
+    # granted and can revoke — not against our ambient process credentials.
+    # The seam and the broker both already existed; only this wiring was
+    # missing, which meant every AWS action would have run against whatever
+    # credentials the process happened to hold.
+    connection_store = ConnectionStore(settings.connection_store_path)
+    credential_broker = CredentialBroker()
+
+    def _aws_credentials_for(tenant_id: str):
+        conn = connection_store.get(tenant_id)
+        if conn is None:
+            return None          # no connection: fall back to ambient creds
+        # Raises rather than silently falling back — a fallback here would run
+        # containment against OUR account and look like success.
+        return credential_broker.credentials(conn, Grant.CONTAIN)
+
+    containment = ContainmentExecutor(
+        settings,
+        build_containment_adapters(settings, aws_credentials_for=_aws_credentials_for),
+    )
     approvals = ApprovalStore(settings.approval_store_path)
     trajectory = None
     if settings.trajectory_guard_enabled:
@@ -144,10 +178,44 @@ async def main(replay: list[tuple[str, str]]) -> int:
     stop = asyncio.Event()
     ingestion_done = asyncio.Event()
 
-    # Source selection: SQS if KRONAGENT_SQS_QUEUE_URL is set (live source, runs
-    # until Ctrl-C), else replay sample events from disk across all providers.
+    # Source selection, most-real first:
+    #   1. verified cloud connections  -> poll GuardDuty through the assumed role
+    #   2. KRONAGENT_SQS_QUEUE_URL     -> the low-latency production path
+    #   3. neither                     -> replay sample events from disk
+    #
+    # (1) is what makes onboarding a single flow: connecting an account is
+    # enough, with no queue to provision and no environment variable to set.
+    # (2) and (3) are unchanged — the demo, the SQS testbed and the tests all
+    # depend on them.
+    healthy = [c for c in connection_store.list()
+               if c.state == ConnectionState.HEALTHY]
+    unhealthy = [c for c in connection_store.list()
+                 if c.state != ConnectionState.HEALTHY]
     sqs_url = os.getenv("KRONAGENT_SQS_QUEUE_URL")
-    if sqs_url:
+
+    if healthy:
+        for conn in healthy:
+            _log("BOOT", f"ingestion: GuardDuty poll for tenant '{conn.tenant_id}' "
+                         f"(account {conn.account_id}, region {conn.region})")
+        # A connection that verified but is not HEALTHY produces no findings,
+        # and silence is exactly how every wiring gap in this path presents.
+        for conn in unhealthy:
+            _log("BOOT", f"ingestion: SKIPPING tenant '{conn.tenant_id}' — connection "
+                         f"state is {conn.state.value}, so it will produce NO findings")
+        sources = [
+            GuardDutyPollingSource(
+                NORMALIZERS["aws"],
+                region=conn.region or settings.aws_region,
+                tenant_id=conn.tenant_id,
+                credentials=(lambda c=conn: credential_broker.credentials(c, Grant.OBSERVE)),
+                poll_interval=settings.guardduty_poll_seconds,
+            )
+            for conn in healthy
+        ]
+        producer = asyncio.create_task(
+            _stream_all(sources, queue, stop)
+        )
+    elif sqs_url:
         sqs_provider = os.getenv("KRONAGENT_SQS_PROVIDER", "aws")
         _log("BOOT", f"ingestion: SQS long-poll {sqs_url} (provider={sqs_provider}, "
                      f"region {settings.aws_region})")
@@ -157,6 +225,9 @@ async def main(replay: list[tuple[str, str]]) -> int:
         )
         producer = asyncio.create_task(source.stream(queue, stop))
     else:
+        if unhealthy:
+            _log("BOOT", f"ingestion: {len(unhealthy)} connection(s) exist but none are "
+                         f"HEALTHY — falling back to file replay")
         _log("BOOT", f"ingestion: file replay {[p for _, p in replay]} "
                      f"(providers: {sorted({pr for pr, _ in replay})})")
         producer = asyncio.create_task(_replay_files(replay, queue, stop))
