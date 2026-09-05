@@ -24,6 +24,7 @@ from .config import Settings
 from .approvals import ApprovalStore, now_iso
 from .allowlist import AllowlistStore, DurationError, parse_duration
 from .audit import AuditLog
+from .insights import insight_tags
 from .identity import (
     DEFAULT_TENANT,
     AuthorizationError,
@@ -442,11 +443,18 @@ def list_cloud_connections(request: Request) -> list[dict[str, Any]]:
 
 @app.get("/api/approvals")
 def list_approvals(request: Request) -> list[Any]:
-    """Retrieve all logged approval requests from the store."""
+    """Retrieve all logged approval requests from the store.
+
+    Each carries its insight tags, so the console can show the
+    decision-relevant part without re-deriving it client-side and without the
+    two implementations drifting apart.
+    """
     check_view_permission(request)
     tenant_id = tenant_scope(request)
     store = get_approval_store(tenant_id)
-    return [r.model_dump() for r in store.list()]
+    return [{**r.model_dump(),
+             "insight_tags": [t.model_dump() for t in insight_tags(r)]}
+            for r in store.list()]
 
 
 @app.post("/api/approvals/{request_id}/action")
