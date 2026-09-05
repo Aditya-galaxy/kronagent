@@ -239,6 +239,25 @@ python3 approve.py list
 python3 approve.py approve <request-id> --by you --reason "confirmed compromise"
 ```
 
+The queue leads with **insight tags** — the decision-relevant part of a request,
+named, so a review takes a glance rather than a read:
+
+```
+apr-51ba  [pending]  terminate_instance on i-0abc  [IRREVERSIBLE]  [DESTRUCTIVE]  [NO ROLLBACK]  [NO EVIDENCE]  [ESCALATED]  [CAMPAIGN]
+apr-193b  [pending]  isolate_instance_sg on i-0def  [UNCONFIGURED]
+apr-cec7  [pending]  delete_pod on miner-pod        [DESTRUCTIVE]  [EVIDENCE PRESERVED]
+```
+
+The second one matters most: `UNCONFIGURED` means a planned call still contains
+a placeholder. In dry-run it renders harmlessly and the request looks routine;
+live, the call goes out malformed. `approve.py show` explains every tag.
+
+Tags are derived **deterministically** from the policy classification and the
+request's own stored fields — never from a model. A tag is read by a human about
+to authorise a production change, so a model-written one would be a
+prompt-injection path into that decision: injected telemetry emitting "known
+false alarm" could talk a reviewer out of containing a real breach.
+
 **Or grant one action class standing autonomy.** Trust is earned per class, is
 audited, and takes effect with no restart:
 

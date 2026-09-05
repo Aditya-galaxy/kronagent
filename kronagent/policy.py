@@ -195,6 +195,20 @@ _ACTION_PROPERTIES: dict[ActionClass, dict] = {
 
 
 
+def action_properties(action_class: ActionClass) -> dict:
+    """The intrinsic classification of one action class, for callers outside the
+    decision path (the approval UI, insight tags).
+
+    Public so nothing has to reach into `_ACTION_PROPERTIES`, and so the
+    unknown-class default stays in one place: maximally dangerous, matching what
+    the engine itself assumes.
+    """
+    return _ACTION_PROPERTIES.get(
+        action_class,
+        {"reversible": False, "blast_radius": BlastRadius.ACCOUNT, "destructive": True},
+    )
+
+
 class PolicyEngine:
     def __init__(self, settings: Settings, allowlist: AllowlistStore) -> None:
         self._settings = settings

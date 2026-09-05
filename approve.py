@@ -34,6 +34,7 @@ from kronagent.audit import AuditLog
 from kronagent.config import Settings
 from kronagent.containment import ContainmentExecutor
 from kronagent.identity import AuthContext, AuthorizationError, Permission, resolve_actor
+from kronagent.insights import insight_tags, tag_labels
 from kronagent.providers import build_containment_adapters
 from kronagent.schemas import AuditRecord, BlastRadius, PolicyDecision
 
@@ -67,7 +68,12 @@ def _resolve(settings: Settings, audit: AuditLog, args: argparse.Namespace,
 
 
 def _fmt(r) -> str:
-    return (f"{r.request_id}  [{r.status}]  {r.action_class.value} on {r.target}\n"
+    # Tags first, on the same line as the action: a reviewer under incident
+    # pressure reads the top two lines and forms a judgement, so the
+    # decision-relevant part has to be up there rather than nine fields down.
+    labels = tag_labels(r)
+    tags = ("  " + "  ".join(f"[{t}]" for t in labels)) if labels else ""
+    return (f"{r.request_id}  [{r.status}]  {r.action_class.value} on {r.target}{tags}\n"
             f"    finding {r.finding_id} ({r.finding_type}), severity {r.severity}\n"
             f"    reason: {r.policy_reason}\n"
             f"    reversible={r.reversible} blast={r.blast_radius}")
@@ -90,6 +96,12 @@ def cmd_show(store: ApprovalStore, args: argparse.Namespace) -> int:
         print(f"No such request: {args.request_id}", file=sys.stderr)
         return 2
     print(_fmt(r))
+    tags = insight_tags(r)
+    if tags:
+        print()
+        for t in tags:
+            print(f"    [{t.label}] ({t.kind}) {t.why}")
+        print()
     if r.threat_intel_summary or r.mitre_techniques:
         techniques = ", ".join(r.mitre_techniques) or "none mapped"
         print(f"    threat intel: {r.threat_intel_summary}")
