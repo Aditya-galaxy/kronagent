@@ -180,6 +180,41 @@ def action_properties(action_class: ActionClass) -> dict:
     )
 
 
+# Which providers can carry out each action class. Most classes belong to one
+# substrate; `block_ip` belongs to five, and blocking an address at the
+# Cloudflare edge is not the same act as rewriting an AWS network ACL, however
+# alike the classification reads. An allowlist entry therefore records which
+# of these it covers. Kept in step with the provider modules by
+# tests/test_provider_scope.py, which reads them.
+_ACTION_PROVIDERS: dict[ActionClass, frozenset[str]] = {
+    ActionClass.DISABLE_ACCESS_KEY: frozenset({"aws"}),
+    ActionClass.ISOLATE_INSTANCE_SG: frozenset({"aws"}),
+    ActionClass.BLOCK_IP: frozenset({"aws", "azure", "cloudflare", "gcp", "onprem"}),
+    ActionClass.ATTACH_DENY_ALL_TO_PRINCIPAL: frozenset({"aws"}),
+    ActionClass.REVOKE_ROLE_SESSIONS: frozenset({"aws"}),
+    ActionClass.TERMINATE_INSTANCE: frozenset({"aws"}),
+    ActionClass.ISOLATE_POD: frozenset({"kubernetes"}),
+    ActionClass.CORDON_NODE: frozenset({"kubernetes"}),
+    ActionClass.DELETE_POD: frozenset({"kubernetes"}),
+    ActionClass.SCALE_DEPLOYMENT_ZERO: frozenset({"kubernetes"}),
+    ActionClass.DISABLE_SERVICE_ACCOUNT_KEY: frozenset({"gcp"}),
+    ActionClass.DISABLE_SERVICE_ACCOUNT: frozenset({"gcp"}),
+    ActionClass.STOP_VM_INSTANCE: frozenset({"gcp"}),
+    ActionClass.ISOLATE_VM_NSG: frozenset({"azure"}),
+    ActionClass.DEALLOCATE_VM: frozenset({"azure"}),
+    ActionClass.DISABLE_ENTRA_PRINCIPAL: frozenset({"azure"}),
+    ActionClass.REVOKE_ENTRA_SESSIONS: frozenset({"azure"}),
+    ActionClass.ISOLATE_HOST_NETWORK: frozenset({"onprem"}),
+    ActionClass.DISABLE_LOCAL_ACCOUNT: frozenset({"onprem"}),
+    ActionClass.KILL_PROCESS: frozenset({"onprem"}),
+}
+
+
+def providers_for(action_class: ActionClass) -> frozenset[str]:
+    """Every provider that can carry out this class; empty for an unknown one."""
+    return _ACTION_PROVIDERS.get(action_class, frozenset())
+
+
 def pinned_classification(action_class: ActionClass) -> dict:
     """The classification in the JSON-safe shape an allowlist entry stores.
 

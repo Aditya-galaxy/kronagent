@@ -72,8 +72,8 @@ async def test_add_writes_governance_audit_record(store: AllowlistStore, audit_l
 
 
 async def test_duplicate_add_flags_already_present(store: AllowlistStore, audit_log: AuditLog) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r1", audit=audit_log)
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r2 (re-confirm)", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r1", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r2 (re-confirm)", audit=audit_log)
     records = [json.loads(l)["record"] for l in open(audit_log._path) if l.strip()]
     gov = [r for r in records if r["stage"] == "governance"]
     assert gov[0]["payload"]["already_present"] is False
@@ -149,7 +149,7 @@ def test_parse_duration_rejects_ambiguous_input(raw) -> None:
 # --------------------------------------------------------------------------- #
 
 async def test_entry_without_ttl_is_standing_authority(store, audit_log) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log)
     assert store.list()[0].expires_at is None
     assert store.is_allowed(ActionClass.BLOCK_IP, now=_in(days=3650)) is True
 
@@ -158,7 +158,7 @@ async def test_expired_entry_is_denied_at_the_gate_before_any_sweep(store, audit
     """The load-bearing property: expiry is enforced by the read path the
     policy engine uses, so the lapse is immediate. If it depended on a sweep
     having run, a stalled cron would silently extend autonomy."""
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=90))
     assert store.is_allowed(ActionClass.BLOCK_IP) is True
     assert store.is_allowed(ActionClass.BLOCK_IP, now=_in(days=89)) is True
@@ -168,7 +168,7 @@ async def test_expired_entry_is_denied_at_the_gate_before_any_sweep(store, audit
 
 
 async def test_add_records_the_ttl_in_the_audit_chain(store, audit_log) -> None:
-    entry = await store.add(ActionClass.BLOCK_IP, by="alice", reason="r", audit=audit_log,
+    entry = await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="r", audit=audit_log,
                             expires_in=timedelta(days=90))
     payload = _governance(audit_log)[0]["payload"]
     assert payload["decision"] == "allowlist_add"
@@ -179,7 +179,7 @@ async def test_expiry_is_audited_as_a_governance_event(store, audit_log) -> None
     """A lapse is a demotion nobody typed. It gets its own hash-chained record,
     carrying the promotion it reverses — six months on, that record is what
     says the authority ended and what it was for."""
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="30 days incident-free",
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="30 days incident-free",
                     audit=audit_log, expires_in=timedelta(days=90))
     store.record_fired(ActionClass.BLOCK_IP)
 
@@ -197,7 +197,7 @@ async def test_expiry_is_audited_as_a_governance_event(store, audit_log) -> None
 
 
 async def test_expiry_sweep_clears_the_entry_and_is_idempotent(store, audit_log) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=1))
     await store.expire_due(audit=audit_log, now=_in(days=2))
     assert store.list() == []
@@ -209,7 +209,7 @@ async def test_expiry_sweep_clears_the_entry_and_is_idempotent(store, audit_log)
 
 
 async def test_expiry_sweep_leaves_live_entries_alone(store, audit_log) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=1))
     await store.add(ActionClass.ISOLATE_POD, by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=90))
@@ -223,12 +223,12 @@ async def test_renewal_resets_the_clock_and_keeps_the_firing_history(store, audi
     """Re-running `add` is the re-earn-it path: fresh reason, fresh TTL. The
     usage evidence has to survive it, or renewing an entry would erase the only
     record of whether it was ever worth having."""
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="initial", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="initial", audit=audit_log,
                     expires_in=timedelta(days=90))
     store.record_fired(ActionClass.BLOCK_IP)
     store.record_fired(ActionClass.BLOCK_IP)
 
-    await store.add(ActionClass.BLOCK_IP, by="bob", reason="still applies", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="bob", reason="still applies", audit=audit_log,
                     expires_in=timedelta(days=90), now=_in(days=89))
     entry = store.list()[0]
     assert entry.promoted_by == "bob"
@@ -259,7 +259,7 @@ async def test_active_excludes_expired_but_list_keeps_it(store, audit_log) -> No
     """`active()` is the set granting autonomy; `list()` is what a review reads.
     A lapsed entry has to stay visible somewhere, or nobody can decide whether
     to renew it."""
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=1))
     now = _in(days=2)
     assert [e.action_class for e in store.active(now=now)] == []
@@ -273,7 +273,7 @@ async def test_active_excludes_expired_but_list_keeps_it(store, audit_log) -> No
 # --------------------------------------------------------------------------- #
 
 async def test_expiring_within_finds_only_live_entries_with_a_deadline(store, audit_log) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=9))
     await store.add(ActionClass.ISOLATE_POD, by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=90))       # too far out
@@ -288,13 +288,13 @@ async def test_expiring_within_finds_only_live_entries_with_a_deadline(store, au
 
 async def test_already_lapsed_entry_is_not_warned_about(store, audit_log) -> None:
     """There is nothing left to warn about — the authority is already gone."""
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=1))
     assert store.expiring_within(timedelta(days=14), now=_in(days=2)) == []
 
 
 async def test_warn_expiring_notifies_the_owner_and_audits_it(store, audit_log) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="30 days incident-free",
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="30 days incident-free",
                     audit=audit_log, owner="dana", expires_in=timedelta(days=9))
     store.record_fired(ActionClass.BLOCK_IP)
 
@@ -318,7 +318,7 @@ async def test_warn_expiring_notifies_the_owner_and_audits_it(store, audit_log) 
 
 async def test_each_owner_is_warned_once_per_deadline(store, audit_log) -> None:
     """Built for a daily cron: the first run warns, the rest stay quiet."""
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=9))
 
     first = await store.warn_expiring(audit=audit_log, within=timedelta(days=14))
@@ -334,11 +334,11 @@ async def test_each_owner_is_warned_once_per_deadline(store, audit_log) -> None:
 async def test_renewal_arms_a_fresh_warning_for_the_new_deadline(store, audit_log) -> None:
     """Warnings are keyed on the deadline, not the class — otherwise renewing an
     entry would buy permanent silence on every future expiry."""
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=9))
     await store.warn_expiring(audit=audit_log, within=timedelta(days=14))
 
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="renewed", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="renewed", audit=audit_log,
                     expires_in=timedelta(days=10))
     again = await store.warn_expiring(audit=audit_log, within=timedelta(days=14))
     assert [e.action_class for e, _ in again] == ["block_ip"]
@@ -347,7 +347,7 @@ async def test_renewal_arms_a_fresh_warning_for_the_new_deadline(store, audit_lo
 async def test_warning_is_recorded_even_with_no_transport_configured(store, audit_log) -> None:
     """The record is the delivery state, so 'nobody was told' is itself on the
     record — and the entry still lapses on schedule either way."""
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=9))
     warned = await store.warn_expiring(audit=audit_log, within=timedelta(days=14), notify=None)
 
@@ -360,7 +360,7 @@ async def test_warning_is_recorded_even_with_no_transport_configured(store, audi
 async def test_a_broken_transport_does_not_stop_the_other_warnings(store, audit_log) -> None:
     """A webhook that throws is a missed courtesy, not a missed control, and it
     must not take the rest of the run down with it."""
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=1))
     await store.add(ActionClass.ISOLATE_POD, by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=2))
@@ -376,7 +376,7 @@ async def test_a_broken_transport_does_not_stop_the_other_warnings(store, audit_
 
 async def test_warning_does_not_extend_the_entry(store, audit_log) -> None:
     """The whole safety argument: warning is not renewal."""
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log,
                     expires_in=timedelta(days=9))
     await store.warn_expiring(audit=audit_log, within=timedelta(days=14))
     assert store.is_allowed(ActionClass.BLOCK_IP, now=_in(days=10)) is False
@@ -387,7 +387,7 @@ async def test_warning_does_not_extend_the_entry(store, audit_log) -> None:
 # --------------------------------------------------------------------------- #
 
 async def test_owner_defaults_to_the_promoter(store, audit_log) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="r", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="r", audit=audit_log)
     entry = store.list()[0]
     assert entry.owner == "alice"
     assert entry.promoted_by == "alice"
@@ -395,7 +395,7 @@ async def test_owner_defaults_to_the_promoter(store, audit_log) -> None:
 
 async def test_an_entry_can_be_promoted_on_someone_elses_behalf(store, audit_log) -> None:
     """An admin runs the command; the team lead is on the hook for renewing it."""
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="r", audit=audit_log, owner="dana")
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="r", audit=audit_log, owner="dana")
     entry = store.list()[0]
     assert entry.owner == "dana"
     assert entry.promoted_by == "alice"
@@ -404,7 +404,7 @@ async def test_an_entry_can_be_promoted_on_someone_elses_behalf(store, audit_log
 
 async def test_reassign_moves_the_owner_and_leaves_history_alone(store, audit_log) -> None:
     """People change teams; the decision they made in March does not."""
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="30 days incident-free",
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="30 days incident-free",
                     audit=audit_log, owner="dana")
     entry = await store.set_owner(ActionClass.BLOCK_IP, owner="erin", by="alice",
                                   reason="dana moved to platform", audit=audit_log)
@@ -417,7 +417,7 @@ async def test_reassign_moves_the_owner_and_leaves_history_alone(store, audit_lo
 
 
 async def test_reassign_is_audited_with_both_owners(store, audit_log) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="r", audit=audit_log, owner="dana")
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="r", audit=audit_log, owner="dana")
     await store.set_owner(ActionClass.BLOCK_IP, owner="erin", by="alice",
                           reason="dana moved to platform", audit=audit_log)
 
@@ -440,11 +440,11 @@ async def test_reassigning_an_unpromoted_class_is_a_noop_but_still_audited(store
 async def test_renewal_keeps_the_current_owner_unless_told_otherwise(store, audit_log) -> None:
     """Renewing on someone's behalf shouldn't quietly move accountability to
     whoever ran the command."""
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="r", audit=audit_log, owner="dana")
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="still applies", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="r", audit=audit_log, owner="dana")
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="still applies", audit=audit_log)
     assert store.list()[0].owner == "dana"
 
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="handing over",
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="handing over",
                     audit=audit_log, owner="erin")
     assert store.list()[0].owner == "erin"
 
@@ -470,7 +470,7 @@ def test_a_store_written_before_ownership_existed_still_reads(store) -> None:
 # --------------------------------------------------------------------------- #
 
 async def test_record_fired_tracks_timestamp_and_count(store, audit_log) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log)
     assert store.list()[0].last_fired_at is None
     assert store.list()[0].fire_count == 0
 
@@ -490,7 +490,7 @@ async def test_record_fired_is_not_audited(store, audit_log) -> None:
     """Firings are already in the audit chain as containment records. Mirroring
     them into the governance stage would bury the promote/demote/expire
     decisions that stage exists to make findable."""
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log)
     store.record_fired(ActionClass.BLOCK_IP)
     assert [g["payload"]["decision"] for g in _governance(audit_log)] == ["allowlist_add"]
 
@@ -528,7 +528,7 @@ def test_long_unused_entry_is_stale_even_though_it_once_fired() -> None:
 async def test_staleness_does_not_revoke_autonomy(store, audit_log) -> None:
     """Unused is a prompt to ask a human, not grounds for the system to decide.
     Only an explicit TTL or an operator demotes anything."""
-    await store.add(ActionClass.BLOCK_IP, by="a", reason="r", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="a", reason="r", audit=audit_log)
     later = _in(days=DEFAULT_STALE_AFTER_DAYS * 10)
     assert store.list()[0].is_stale(now=later) is True
     assert store.is_allowed(ActionClass.BLOCK_IP, now=later) is True
@@ -571,7 +571,7 @@ def _write_entry(tmp_path, **fields) -> None:
 
 
 def test_cli_add_with_ttl_reports_the_expiry(tmp_path) -> None:
-    result = _run(["add", "block_ip", "--by", "alice", "--reason", "proven safe",
+    result = _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "proven safe",
                    "--expires-in", "90d"], tmp_path)
     assert result.returncode == 0
     assert "Promoted block_ip" in result.stdout
@@ -582,14 +582,14 @@ def test_cli_add_with_ttl_reports_the_expiry(tmp_path) -> None:
 def test_cli_add_without_ttl_names_it_standing_authority(tmp_path) -> None:
     """The default is still no expiry — but an operator should leave knowing
     they just granted authority that nothing will ever ask them about again."""
-    result = _run(["add", "block_ip", "--by", "alice", "--reason", "r"], tmp_path)
+    result = _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r"], tmp_path)
     assert result.returncode == 0
     assert "standing authority" in result.stdout
     assert "--expires-in" in result.stdout
 
 
 def test_cli_rejects_an_unparseable_ttl(tmp_path) -> None:
-    result = _run(["add", "block_ip", "--by", "alice", "--reason", "r",
+    result = _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r",
                    "--expires-in", "90"], tmp_path)
     assert result.returncode == 2
     assert "--expires-in" in result.stderr
@@ -597,14 +597,14 @@ def test_cli_rejects_an_unparseable_ttl(tmp_path) -> None:
 
 
 def test_cli_re_add_is_reported_as_a_renewal(tmp_path) -> None:
-    _run(["add", "block_ip", "--by", "alice", "--reason", "initial", "--expires-in", "90d"], tmp_path)
-    result = _run(["add", "block_ip", "--by", "bob", "--reason", "still applies",
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "initial", "--expires-in", "90d"], tmp_path)
+    result = _run(["add", "block_ip", "--provider", "aws", "--by", "bob", "--reason", "still applies",
                    "--expires-in", "90d"], tmp_path)
     assert "Renewed block_ip" in result.stdout
 
 
 def test_cli_sweeps_lapsed_entries_and_audits_the_lapse(tmp_path) -> None:
-    _run(["add", "block_ip", "--by", "alice", "--reason", "r"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r"], tmp_path)
     _write_entry(tmp_path, expires_at=_in(days=-1).isoformat(), reason="lapsed one")
 
     result = _run(["list"], tmp_path)
@@ -619,7 +619,7 @@ def test_cli_sweeps_lapsed_entries_and_audits_the_lapse(tmp_path) -> None:
 
 
 def test_cli_list_shows_expiry_and_firing_history(tmp_path) -> None:
-    _run(["add", "block_ip", "--by", "alice", "--reason", "r", "--expires-in", "90d"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r", "--expires-in", "90d"], tmp_path)
     result = _run(["list"], tmp_path)
     assert "expires:" in result.stdout
     assert "last fired: NEVER" in result.stdout
@@ -628,7 +628,7 @@ def test_cli_list_shows_expiry_and_firing_history(tmp_path) -> None:
 def test_cli_review_surfaces_the_promotion_context(tmp_path) -> None:
     """The question this whole feature exists to answer: six months in, what was
     this entry for, who staked their name on it, and has it ever done anything?"""
-    _run(["add", "block_ip", "--by", "alice", "--reason", "30 days incident-free"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "30 days incident-free"], tmp_path)
     _write_entry(tmp_path, reason="30 days incident-free")  # ...promoted 200 days ago
     result = _run(["review", "--by", "carol"], tmp_path)
 
@@ -644,7 +644,7 @@ def test_cli_review_surfaces_the_promotion_context(tmp_path) -> None:
 def test_cli_review_does_not_flag_a_promotion_made_yesterday(tmp_path) -> None:
     """It hasn't had a chance to fire yet. Flagging it would train operators to
     scroll past the flag that matters."""
-    _run(["add", "block_ip", "--by", "alice", "--reason", "r", "--expires-in", "90d"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r", "--expires-in", "90d"], tmp_path)
     result = _run(["review", "--by", "carol", "--strict"], tmp_path)
     assert result.returncode == 0
     assert "never fired" not in result.stdout
@@ -654,7 +654,7 @@ def test_cli_review_does_not_flag_a_promotion_made_yesterday(tmp_path) -> None:
 def test_cli_review_records_that_someone_looked(tmp_path) -> None:
     """'Who reviews the allowlist six months in' is only answerable if reviewing
     is itself an audited event."""
-    _run(["add", "block_ip", "--by", "alice", "--reason", "r"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r"], tmp_path)
     _write_entry(tmp_path)  # ...and it has sat unused ever since
     _run(["review", "--by", "carol"], tmp_path)
 
@@ -671,7 +671,7 @@ def test_cli_review_surfaces_entries_that_lapsed_since_the_last_review(tmp_path)
     """A lapse removes the entry, so without this its only trace is one line on
     stderr of whichever command happened to trigger the sweep — which nobody was
     watching. The renew-or-let-it-go decision belongs at the next review."""
-    _run(["add", "block_ip", "--by", "alice", "--reason", "30 days incident-free"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "30 days incident-free"], tmp_path)
     _write_entry(tmp_path, expires_at=_in(days=-1).isoformat(), reason="30 days incident-free")
     _run(["list"], tmp_path)  # triggers the sweep
 
@@ -689,19 +689,19 @@ def test_cli_review_surfaces_entries_that_lapsed_since_the_last_review(tmp_path)
 def test_cli_review_strict_fails_when_an_entry_needs_a_decision(tmp_path) -> None:
     """So a scheduled review fails loudly instead of printing into a log nobody
     reads — the exact failure mode this feature is about."""
-    _run(["add", "block_ip", "--by", "alice", "--reason", "r"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r"], tmp_path)
     assert _run(["review", "--by", "carol", "--strict"], tmp_path).returncode == 3
 
 
 def test_cli_add_names_the_owner(tmp_path) -> None:
-    result = _run(["add", "block_ip", "--by", "alice", "--reason", "r", "--owner", "dana"], tmp_path)
+    result = _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r", "--owner", "dana"], tmp_path)
     assert result.returncode == 0
     assert "Owner: dana" in result.stdout
     assert "owned by dana" in _run(["list"], tmp_path).stdout
 
 
 def test_cli_reassign_moves_ownership_without_rewriting_history(tmp_path) -> None:
-    _run(["add", "block_ip", "--by", "alice", "--reason", "30 days incident-free",
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "30 days incident-free",
           "--owner", "dana"], tmp_path)
     result = _run(["reassign", "block_ip", "--to", "erin", "--by", "alice",
                    "--reason", "dana moved to platform"], tmp_path)
@@ -721,7 +721,7 @@ def test_cli_review_does_not_claim_a_reassignment_that_never_happened(tmp_path) 
     start. Reporting that as "reassigned since promotion" was false on every
     such entry — and the store has no way to know, since a reassignment is an
     audit event, not a property of the entry."""
-    _run(["add", "block_ip", "--by", "alice", "--reason", "r", "--owner", "dana"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r", "--owner", "dana"], tmp_path)
     review = _run(["review", "--by", "carol"], tmp_path)
     assert "owner        dana" in review.stdout
     assert "reassigned" not in review.stdout
@@ -749,7 +749,7 @@ def test_cli_reassign_requires_promote_permission(tmp_path) -> None:
 
 
 def test_cli_review_names_the_owner_to_chase_for_a_lapsed_entry(tmp_path) -> None:
-    _run(["add", "block_ip", "--by", "alice", "--reason", "r", "--owner", "dana"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r", "--owner", "dana"], tmp_path)
     _write_entry(tmp_path, owner="dana", expires_at=_in(days=-1).isoformat())
     _run(["list"], tmp_path)  # triggers the sweep
 
@@ -758,7 +758,7 @@ def test_cli_review_names_the_owner_to_chase_for_a_lapsed_entry(tmp_path) -> Non
 
 
 def test_cli_warn_expiring_reports_and_records_once(tmp_path) -> None:
-    _run(["add", "block_ip", "--by", "alice", "--reason", "30 days incident-free",
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "30 days incident-free",
           "--owner", "dana"], tmp_path)
     _write_entry(tmp_path, owner="dana", reason="30 days incident-free",
                  expires_at=_in(days=9).isoformat())
@@ -779,7 +779,7 @@ def test_cli_warn_expiring_reports_and_records_once(tmp_path) -> None:
 def test_cli_warn_expiring_dry_run_records_nothing(tmp_path) -> None:
     """So an operator can see who is about to be pinged without consuming the
     one warning that entry gets."""
-    _run(["add", "block_ip", "--by", "alice", "--reason", "r", "--owner", "dana"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r", "--owner", "dana"], tmp_path)
     _write_entry(tmp_path, owner="dana", expires_at=_in(days=9).isoformat())
 
     dry = _run(["warn-expiring", "--dry-run"], tmp_path)
@@ -794,7 +794,7 @@ def test_cli_warn_expiring_dry_run_records_nothing(tmp_path) -> None:
 
 
 def test_cli_warn_expiring_ignores_entries_that_are_not_close(tmp_path) -> None:
-    _run(["add", "block_ip", "--by", "alice", "--reason", "r", "--expires-in", "90d"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r", "--expires-in", "90d"], tmp_path)
     result = _run(["warn-expiring", "--within", "14d"], tmp_path)
     assert "No allowlist entries expiring within 14d" in result.stdout
 
@@ -802,7 +802,7 @@ def test_cli_warn_expiring_ignores_entries_that_are_not_close(tmp_path) -> None:
 def test_cli_warn_expiring_needs_no_operator_identity(tmp_path) -> None:
     """It's a system action for cron — nobody is deciding anything, the TTL
     already did. Requiring --by would just invite a shared fake identity."""
-    _run(["add", "block_ip", "--by", "alice", "--reason", "r"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r"], tmp_path)
     _write_entry(tmp_path, expires_at=_in(days=3).isoformat())
     result = _run(["warn-expiring"], tmp_path)
     assert result.returncode == 0
@@ -813,7 +813,7 @@ def test_cli_reports_an_entry_whose_action_class_no_longer_exists(tmp_path) -> N
     """A renamed or removed action leaves an orphan entry. It grants nothing —
     the policy engine can never propose that class — but the review has to
     survive finding one and tell the operator to clean it up."""
-    _run(["add", "block_ip", "--by", "alice", "--reason", "r"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r"], tmp_path)
     _write_entry(tmp_path, action_class="retired_action")
 
     listed = _run(["list"], tmp_path)
@@ -832,7 +832,7 @@ def test_cli_review_strict_passes_on_an_empty_allowlist(tmp_path) -> None:
 
 
 def test_cli_review_flags_an_entry_expiring_soon(tmp_path) -> None:
-    _run(["add", "block_ip", "--by", "alice", "--reason", "r", "--expires-in", "10d"], tmp_path)
+    _run(["add", "block_ip", "--provider", "aws", "--by", "alice", "--reason", "r", "--expires-in", "10d"], tmp_path)
     within = _run(["review", "--by", "carol", "--expiring-within", "14d"], tmp_path)
     assert "expiring soon" in within.stdout
 
@@ -867,7 +867,7 @@ def test_cli_review_is_allowed_for_a_viewer_role(tmp_path) -> None:
     assert result.returncode == 0, result.stderr
 
     denied = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "promote.py"), "add", "block_ip",
+        [sys.executable, str(REPO_ROOT / "promote.py"), "add", "block_ip", "--provider", "aws",
          "--as", "vic", "--token", "secret", "--reason", "r"],
         capture_output=True, text=True, cwd=str(REPO_ROOT),
         env={**env_path,

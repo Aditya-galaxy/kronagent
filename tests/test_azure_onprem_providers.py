@@ -263,7 +263,7 @@ async def test_destructive_new_actions_can_never_auto_execute(
     await allowlist_store.add(action_class, by="test", reason="deliberately allowlisted",
                               audit=audit_log)
     policy = PolicyEngine(settings, allowlist_store)
-    decision = policy.decide(make_action(provider="azure", action_class=action_class), severity=9.0)
+    decision = policy.decide(make_action(action_class=action_class), severity=9.0)
     assert decision.disposition != "auto_execute"
 
 
@@ -280,7 +280,7 @@ async def test_reversible_new_actions_are_auto_eligible_once_allowlisted(
 
     await allowlist_store.add(action_class, by="test", reason="earned trust", audit=audit_log)
     policy = PolicyEngine(settings, allowlist_store)
-    decision = policy.decide(make_action(provider="azure", action_class=action_class), severity=8.0)
+    decision = policy.decide(make_action(action_class=action_class), severity=8.0)
     assert decision.disposition == "auto_execute"
 
 

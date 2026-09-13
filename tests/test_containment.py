@@ -23,7 +23,7 @@ async def test_plan_is_always_computed_even_when_blocked(settings) -> None:
     rollback) is recorded for every action, even one that never runs."""
     adapter = FakeContainmentAdapter()
     executor = _executor(settings, adapter)
-    action = make_action(action_class=ActionClass.DISABLE_ACCESS_KEY)
+    action = make_action(provider="fake", action_class=ActionClass.DISABLE_ACCESS_KEY)
     decision = make_decision(action_class=ActionClass.DISABLE_ACCESS_KEY, disposition="blocked")
 
     outcome = await executor.execute(action, decision)
@@ -38,7 +38,7 @@ async def test_plan_is_always_computed_even_when_blocked(settings) -> None:
 async def test_requires_approval_never_executes(settings) -> None:
     adapter = FakeContainmentAdapter()
     executor = _executor(settings, adapter)
-    action = make_action(action_class=ActionClass.TERMINATE_INSTANCE)
+    action = make_action(provider="fake", action_class=ActionClass.TERMINATE_INSTANCE)
     decision = make_decision(action_class=ActionClass.TERMINATE_INSTANCE, disposition="requires_approval")
 
     outcome = await executor.execute(action, decision)
@@ -52,7 +52,7 @@ async def test_auto_execute_in_dry_run_plans_but_does_not_perform(settings) -> N
     assert settings.dry_run is True  # sanity: the fixture default
     adapter = FakeContainmentAdapter()
     executor = _executor(settings, adapter)
-    action = make_action(action_class=ActionClass.DISABLE_ACCESS_KEY)
+    action = make_action(provider="fake", action_class=ActionClass.DISABLE_ACCESS_KEY)
     decision = make_decision(action_class=ActionClass.DISABLE_ACCESS_KEY, disposition="auto_execute")
 
     outcome = await executor.execute(action, decision)
@@ -66,7 +66,7 @@ async def test_auto_execute_in_dry_run_plans_but_does_not_perform(settings) -> N
 async def test_auto_execute_live_calls_perform(settings_live) -> None:
     adapter = FakeContainmentAdapter()
     executor = _executor(settings_live, adapter)
-    action = make_action(action_class=ActionClass.DISABLE_ACCESS_KEY, target="AKIA-live")
+    action = make_action(provider="fake", action_class=ActionClass.DISABLE_ACCESS_KEY, target="AKIA-live")
     decision = make_decision(action_class=ActionClass.DISABLE_ACCESS_KEY, disposition="auto_execute")
 
     outcome = await executor.execute(action, decision)
@@ -83,7 +83,7 @@ async def test_live_execution_failure_is_captured_not_raised(settings_live) -> N
     propagate and crash the orchestrator loop."""
     adapter = FakeContainmentAdapter(raise_on_perform=RuntimeError("boto3 said no"))
     executor = _executor(settings_live, adapter)
-    action = make_action(action_class=ActionClass.DISABLE_ACCESS_KEY)
+    action = make_action(provider="fake", action_class=ActionClass.DISABLE_ACCESS_KEY)
     decision = make_decision(action_class=ActionClass.DISABLE_ACCESS_KEY, disposition="auto_execute")
 
     outcome = await executor.execute(action, decision)

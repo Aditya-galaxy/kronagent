@@ -65,6 +65,13 @@ this platform's safety case rests on. Three mechanisms close it:
     ceiling) would otherwise go live the day the table relaxed it. Only a
     renewal lifts this suspension, because only a renewal is a decision about
     the new classification.
+  * **Provider scope.** One action class can be carried out by several
+    providers — `block_ip` by five — and a promotion is evidence about the
+    one it was earned on. So an entry records the providers it covers
+    (`provider_scope`), a class that more than one provider can carry out
+    cannot be promoted without naming them, and the gate refuses the entry
+    for any provider outside its scope. Entries written before scoping
+    cover every provider, as they always did, and review flags them.
   * **Review.** Everything a periodic review needs (who owns it, who promoted
     it, when, why, when it last fired, when it lapses) travels on the entry, so
     `promote.py review` can ask "does this still apply?" with the context in
@@ -92,14 +99,14 @@ import os
 import re
 import tempfile
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 from pydantic import (
     AliasChoices, BaseModel, ConfigDict, Field, ValidationError, model_validator,
 )
 
 from .audit import AuditLog
-from .classification import pinned_classification
+from .classification import pinned_classification, providers_for
 from .identity import OwnerVacancy
 from .schemas import ActionClass, AuditRecord, utcnow_iso
 
@@ -116,6 +123,13 @@ _DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhdw])\s*$", re.IGNORECASE)
 # tenant by `identity.owner_vacancy_checker`, injected so the store never reads
 # the operator registry itself.
 OwnerCheck = Callable[[str], Optional[OwnerVacancy]]
+
+def _seed_scope(action_class: str) -> Optional[list[str]]:
+    try:
+        return sorted(providers_for(ActionClass(action_class))) or None
+    except ValueError:
+        return None
+
 
 SUSPENDED_OWNER_VACANT = "owner_vacant"
 SUSPENDED_RECLASSIFIED = "reclassified"
@@ -136,6 +150,38 @@ class OwnerNotInStandingError(ValueError):
     def __init__(self, vacancy: OwnerVacancy) -> None:
         super().__init__(vacancy.reason)
         self.vacancy = vacancy
+
+
+class ProviderScopeError(ValueError):
+    """A promotion that does not say — or says wrongly — which providers it covers."""
+
+
+def resolve_provider_scope(
+    action_class: ActionClass, providers: Optional[Iterable[str]],
+) -> list[str]:
+    """The providers a new promotion covers, or ProviderScopeError.
+
+    A class only one provider can carry out needs no choice. A shared one
+    must name its providers: silently covering all of them is how a
+    promotion earned on Cloudflare edge blocks came to rewrite AWS network
+    ACLs unattended.
+    """
+    available = providers_for(action_class)
+    if providers is None:
+        if len(available) == 1:
+            return sorted(available)
+        raise ProviderScopeError(
+            f"{action_class.value} can be carried out by {', '.join(sorted(available))} — "
+            f"name the provider(s) this promotion was earned on"
+        )
+    chosen = sorted(set(providers))
+    unknown = [p for p in chosen if p not in available]
+    if not chosen or unknown:
+        raise ProviderScopeError(
+            f"{action_class.value} can only be carried out by "
+            f"{', '.join(sorted(available))}; got {', '.join(chosen) or 'nothing'}"
+        )
+    return chosen
 
 
 class DurationError(ValueError):
@@ -216,6 +262,13 @@ class AllowlistEntry(BaseModel):
     # last renewed). None on entries written before pinning existed: those are
     # not checked, and review says so, until a renewal pins them.
     classification: Optional[dict] = None
+    # Providers this promotion covers. None on entries written before scoping:
+    # they cover every provider that can carry out the class, as they always
+    # did, and review flags a shared class promoted that way.
+    provider_scope: Optional[list[str]] = None
+
+    def covers(self, provider: str) -> bool:
+        return self.provider_scope is None or provider in self.provider_scope
 
     @model_validator(mode="after")
     def _default_owner_to_promoter(self) -> "AllowlistEntry":
@@ -272,6 +325,9 @@ class AllowlistStore:
                     action_class=ac, promoted_by="system",
                     reason="seeded from KRONAGENT_AUTO_EXECUTE_ALLOWLIST",
                     classification=_current_classification(ac),
+                    # The env var names classes, not providers, so a seeded
+                    # entry covers everything it always did — now on the record.
+                    provider_scope=_seed_scope(ac),
                 ).model_dump()
                 for ac in seed
             })
@@ -302,7 +358,7 @@ class AllowlistStore:
     # --- read path used by PolicyEngine on every decision ---
     def evaluate(
         self, action_class: ActionClass, *, now: Optional[datetime] = None,
-        owner_check: Optional[OwnerCheck] = None,
+        owner_check: Optional[OwnerCheck] = None, provider: Optional[str] = None,
     ) -> tuple[bool, Optional[str]]:
         """Whether this class is authorized for autonomy right now, and if an
         entry exists but does not hold, why not.
@@ -311,6 +367,9 @@ class AllowlistStore:
         none of it waits for a sweep: an expired TTL, a latched suspension, and
         an owner who is no longer in standing. The sweeps only record what this
         already refuses. `(False, None)` means there is simply no entry.
+
+        `provider` is the provider the action would run on. The policy engine
+        always passes it; without it, scope is not applied.
         """
         raw = self._read_all().get(action_class.value)
         if raw is None:
@@ -323,6 +382,9 @@ class AllowlistStore:
             return False, f"allowlist entry expired at {entry.expires_at}"
         if entry.is_suspended:
             return False, f"allowlist entry suspended: {entry.suspended_reason}"
+        if provider is not None and not entry.covers(provider):
+            return False, (f"allowlist entry covers {', '.join(entry.provider_scope)} "
+                           f"only, not {provider}")
         drift = entry.classification_drift()
         if drift is not None:
             return False, f"allowlist entry no longer applies: {drift}"
@@ -366,13 +428,22 @@ class AllowlistStore:
         self, action_class: ActionClass, *, by: str, reason: str, audit: AuditLog,
         actor_fields: Optional[dict] = None, expires_in: Optional[timedelta] = None,
         owner: Optional[str] = None, now: Optional[datetime] = None,
-        owner_check: Optional[OwnerCheck] = None,
+        owner_check: Optional[OwnerCheck] = None, providers: Optional[Iterable[str]] = None,
     ) -> AllowlistEntry:
         """Promote a class, or renew it. A renewal is a fresh decision, so it
         also lifts any suspension — but only onto an owner who is in standing:
         with `owner_check`, naming (or inheriting) an owner who has left raises
         `OwnerNotInStandingError` and writes nothing, since the entry would be
-        suspended again on the next sweep with nobody to ask."""
+        suspended again on the next sweep with nobody to ask.
+
+        `providers` scopes the promotion; see `resolve_provider_scope`. A
+        renewal that names none keeps the scope it had, and one of a legacy
+        unscoped entry on a shared class must name them. Raises
+        ProviderScopeError, writing nothing."""
+        previous = self._read_all().get(action_class.value)
+        if providers is None and previous and previous.get("provider_scope"):
+            providers = previous["provider_scope"]
+        scope = resolve_provider_scope(action_class, providers)
         expires_at = ((now or _utcnow()) + expires_in).isoformat() if expires_in else None
         entry = AllowlistEntry(
             action_class=action_class.value, promoted_by=by, reason=reason,
@@ -380,6 +451,7 @@ class AllowlistStore:
             # Pinned afresh on every renewal: renewing is the decision about
             # the action as it is classified today.
             classification=pinned_classification(action_class),
+            provider_scope=scope,
         )
         data = self._read_all()
         previous = data.get(action_class.value)
@@ -408,6 +480,8 @@ class AllowlistStore:
                 "expires_at": expires_at, "owner": entry.owner,
                 "lifted_suspension": (previous or {}).get("suspended_reason"),
                 "classification": entry.classification,
+                "provider_scope": scope,
+                "previous_provider_scope": (previous or {}).get("provider_scope"),
                 **(actor_fields or {}),
             },
         ))

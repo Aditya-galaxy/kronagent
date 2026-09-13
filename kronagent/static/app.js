@@ -61,6 +61,7 @@ document.addEventListener("DOMContentLoaded", () => {
         modalActionType: document.getElementById("modal-action-type"),
         modalActionClass: document.getElementById("modal-action-class"),
         modalExpiresIn: document.getElementById("modal-expires-in"),
+        modalProvider: document.getElementById("modal-provider"),
         modalReasonGroup: document.getElementById("modal-reason-group"),
         modalOwnerGroup: document.getElementById("modal-owner-group"),
         modalOwnerLabel: document.getElementById("modal-owner-label"),
@@ -605,6 +606,7 @@ document.addEventListener("DOMContentLoaded", () => {
         elements.authReason.value = "";
         elements.authOwner.value = "";
         elements.modalExpiresIn.value = "";
+        elements.modalProvider.value = "";
         elements.modalOwnerGroup.style.display = "none";
         elements.authOwner.required = false;
         elements.modalReasonGroup.style.display = "flex";
@@ -729,7 +731,10 @@ document.addEventListener("DOMContentLoaded", () => {
                         token: token,
                         reason: reason,
                         owner: elements.authOwner.value.trim() || null,
-                        expires_in: elements.modalExpiresIn.value || null
+                        expires_in: elements.modalExpiresIn.value || null,
+                        // The provider the option was labelled with. Empty on a
+                        // renewal, which keeps the entry's existing scope.
+                        providers: elements.modalProvider.value ? [elements.modalProvider.value] : null
                     })
                 });
 
@@ -816,6 +821,10 @@ document.addEventListener("DOMContentLoaded", () => {
         elements.modalActionType.value = "promote";
         elements.modalActionClass.value = elements.promoteClass.value;
         elements.modalExpiresIn.value = elements.promoteExpires.value;
+        // Scope the promotion to the provider the operator was shown. Without
+        // it, "block_ip (AWS)" would silently cover every provider's block_ip.
+        const chosen = elements.promoteClass.selectedOptions[0];
+        elements.modalProvider.value = (chosen && chosen.dataset.provider) || "";
 
         // Carry the owner through the auth step so it can be set by whoever is
         // promoting on someone else's behalf, and stays visible/editable there.

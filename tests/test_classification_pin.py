@@ -56,7 +56,7 @@ def test_every_classification_field_is_pinned() -> None:
 
 
 async def test_add_and_seed_pin_the_current_classification(store, audit_log, tmp_path) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="r", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="r", audit=audit_log)
     assert store.list()[0].classification == pinned_classification(ActionClass.BLOCK_IP)
 
     seeded = AllowlistStore(str(tmp_path / "seeded.json"),
@@ -96,7 +96,7 @@ async def test_an_inert_promotion_does_not_go_live_when_the_table_relaxes(
 
 async def test_a_tightened_class_is_refused_by_the_entry_as_well_as_the_ceiling(
         store, audit_log, monkeypatch) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="r", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="r", audit=audit_log)
     _reclassify(monkeypatch, ActionClass.BLOCK_IP, blast_radius=BlastRadius.ACCOUNT)
     allowed, why = store.evaluate(ActionClass.BLOCK_IP)
     assert allowed is False
@@ -105,7 +105,7 @@ async def test_a_tightened_class_is_refused_by_the_entry_as_well_as_the_ceiling(
 
 async def test_the_sweep_latches_once_and_reverting_the_table_does_not_undo_it(
         store, audit_log, monkeypatch) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="quiet for 30d", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="quiet for 30d", audit=audit_log)
     original = dict(classification._ACTION_PROPERTIES[ActionClass.BLOCK_IP])
     _reclassify(monkeypatch, ActionClass.BLOCK_IP, reversible=False)
 
@@ -128,7 +128,7 @@ async def test_the_sweep_latches_once_and_reverting_the_table_does_not_undo_it(
 
 async def test_a_reassignment_does_not_lift_it_and_a_renewal_does(
         store, audit_log, monkeypatch) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="r", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="r", audit=audit_log)
     _reclassify(monkeypatch, ActionClass.BLOCK_IP, reversible=False)
     await store.suspend_reclassified(audit=audit_log)
 
@@ -137,7 +137,7 @@ async def test_a_reassignment_does_not_lift_it_and_a_renewal_does(
     assert store.list()[0].is_suspended is True
 
     # The renewal is a decision about the action as it is classified now.
-    await store.add(ActionClass.BLOCK_IP, by="alice", reason="still applies", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="still applies", audit=audit_log)
     entry = store.list()[0]
     assert entry.is_suspended is False
     assert entry.classification["reversible"] is False
