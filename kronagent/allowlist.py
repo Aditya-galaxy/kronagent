@@ -55,6 +55,16 @@ this platform's safety case rests on. Three mechanisms close it:
     until someone with PROMOTE renews it or hands it to an owner who is still
     here. Reinstating the old owner does not lift it on its own — a quiet edit
     to a registry file is not a decision anyone made about autonomy.
+  * **Pinned classification.** An entry records how the policy table
+    classified its action on the day it was promoted. If that classification
+    changes — in either direction — the entry stops holding and the sweep
+    `suspend_reclassified()` latches it. A promotion was a decision about an
+    action with particular properties; an action with different properties
+    has not been decided about. The dangerous case is the quiet one: a class
+    promoted while classified destructive (recorded, but inert behind the
+    ceiling) would otherwise go live the day the table relaxed it. Only a
+    renewal lifts this suspension, because only a renewal is a decision about
+    the new classification.
   * **Review.** Everything a periodic review needs (who owns it, who promoted
     it, when, why, when it last fired, when it lapses) travels on the entry, so
     `promote.py review` can ask "does this still apply?" with the context in
@@ -89,6 +99,7 @@ from pydantic import (
 )
 
 from .audit import AuditLog
+from .classification import pinned_classification
 from .identity import OwnerVacancy
 from .schemas import ActionClass, AuditRecord, utcnow_iso
 
@@ -107,6 +118,16 @@ _DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhdw])\s*$", re.IGNORECASE)
 OwnerCheck = Callable[[str], Optional[OwnerVacancy]]
 
 SUSPENDED_OWNER_VACANT = "owner_vacant"
+SUSPENDED_RECLASSIFIED = "reclassified"
+
+
+def _current_classification(action_class: str) -> Optional[dict]:
+    """None for a class the taxonomy no longer knows: it grants nothing
+    anyway, and there is no current classification to compare against."""
+    try:
+        return pinned_classification(ActionClass(action_class))
+    except ValueError:
+        return None
 
 
 class OwnerNotInStandingError(ValueError):
@@ -191,6 +212,10 @@ class AllowlistEntry(BaseModel):
     suspended_at: Optional[str] = None
     suspended_trigger: Optional[str] = None
     suspended_reason: Optional[str] = None
+    # How the policy table classified this action when it was promoted (or
+    # last renewed). None on entries written before pinning existed: those are
+    # not checked, and review says so, until a renewal pins them.
+    classification: Optional[dict] = None
 
     @model_validator(mode="after")
     def _default_owner_to_promoter(self) -> "AllowlistEntry":
@@ -211,6 +236,22 @@ class AllowlistEntry(BaseModel):
     def is_suspended(self) -> bool:
         return self.suspended_at is not None
 
+    def classification_drift(self) -> Optional[str]:
+        """How this action's classification has changed since it was pinned,
+        or None if it has not (or was never pinned)."""
+        if self.classification is None:
+            return None
+        current = _current_classification(self.action_class)
+        if current is None or current == self.classification:
+            return None
+        changes = [
+            f"{field} {self.classification.get(field)!r} → {current[field]!r}"
+            for field in sorted(current)
+            if self.classification.get(field) != current[field]
+        ]
+        return ("the policy table reclassified this action since it was promoted: "
+                + ", ".join(changes))
+
     def is_stale(self, *, after_days: int = DEFAULT_STALE_AFTER_DAYS,
                  now: Optional[datetime] = None) -> bool:
         """True if this entry has not authorized an execution in `after_days`.
@@ -230,6 +271,7 @@ class AllowlistStore:
                 ac: AllowlistEntry(
                     action_class=ac, promoted_by="system",
                     reason="seeded from KRONAGENT_AUTO_EXECUTE_ALLOWLIST",
+                    classification=_current_classification(ac),
                 ).model_dump()
                 for ac in seed
             })
@@ -281,6 +323,9 @@ class AllowlistStore:
             return False, f"allowlist entry expired at {entry.expires_at}"
         if entry.is_suspended:
             return False, f"allowlist entry suspended: {entry.suspended_reason}"
+        drift = entry.classification_drift()
+        if drift is not None:
+            return False, f"allowlist entry no longer applies: {drift}"
         if owner_check is not None:
             vacancy = owner_check(entry.owner)
             if vacancy is not None:
@@ -332,6 +377,9 @@ class AllowlistStore:
         entry = AllowlistEntry(
             action_class=action_class.value, promoted_by=by, reason=reason,
             expires_at=expires_at, owner=owner or by,
+            # Pinned afresh on every renewal: renewing is the decision about
+            # the action as it is classified today.
+            classification=pinned_classification(action_class),
         )
         data = self._read_all()
         previous = data.get(action_class.value)
@@ -359,6 +407,7 @@ class AllowlistStore:
                 "by": by, "reason": reason, "already_present": previous is not None,
                 "expires_at": expires_at, "owner": entry.owner,
                 "lifted_suspension": (previous or {}).get("suspended_reason"),
+                "classification": entry.classification,
                 **(actor_fields or {}),
             },
         ))
@@ -510,6 +559,51 @@ class AllowlistStore:
                     "decision": "allowlist_suspended", "action_class": entry.action_class,
                     "trigger": SUSPENDED_OWNER_VACANT,
                     "by": "system", "reason": vacancy.reason,
+                    "owner": entry.owner,
+                    "promoted_by": entry.promoted_by, "promoted_at": entry.promoted_at,
+                    "promotion_reason": entry.reason, "expires_at": entry.expires_at,
+                    "last_fired_at": entry.last_fired_at, "fire_count": entry.fire_count,
+                    "identity_verified": False, "auth_method": "system",
+                },
+            ))
+        return suspended
+
+    async def suspend_reclassified(
+        self, *, audit: AuditLog, now: Optional[datetime] = None,
+    ) -> list[tuple[AllowlistEntry, str]]:
+        """Latch a suspension on every entry whose action has been reclassified.
+
+        Same contract as `suspend_vacant_owners`: the gate already refuses
+        these, and this makes it a recorded event that sticks. Without the
+        latch, reverting the table would silently restore autonomy that was
+        never re-decided. Idempotent — suspended entries are skipped.
+        """
+        now = now or _utcnow()
+        data = self._read_all()
+        suspended = []
+        for entry in self.list():
+            if entry.is_expired(now) or entry.is_suspended:
+                continue
+            drift = entry.classification_drift()
+            if drift is None:
+                continue
+            raw = data[entry.action_class]
+            raw["suspended_at"] = now.isoformat()
+            raw["suspended_trigger"] = SUSPENDED_RECLASSIFIED
+            raw["suspended_reason"] = drift
+            suspended.append((AllowlistEntry.model_validate(raw), drift))
+        if not suspended:
+            return []
+        self._write_all(data)
+        for entry, drift in suspended:
+            await audit.record(AuditRecord(
+                finding_id="_governance", stage="governance",
+                payload={
+                    "decision": "allowlist_suspended", "action_class": entry.action_class,
+                    "trigger": SUSPENDED_RECLASSIFIED,
+                    "by": "system", "reason": drift,
+                    "pinned_classification": entry.classification,
+                    "current_classification": _current_classification(entry.action_class),
                     "owner": entry.owner,
                     "promoted_by": entry.promoted_by, "promoted_at": entry.promoted_at,
                     "promotion_reason": entry.reason, "expires_at": entry.expires_at,
