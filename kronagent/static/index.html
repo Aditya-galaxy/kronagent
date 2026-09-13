@@ -197,17 +197,17 @@
                                 <select id="promote-class" required>
                                     <option value="" disabled selected>Select an action class...</option>
                                     <!-- AWS -->
-                                    <option value="disable_access_key">disable_access_key (AWS)</option>
-                                    <option value="attach_deny_all_to_principal">attach_deny_all_to_principal (AWS)</option>
-                                    <option value="isolate_instance_sg">isolate_instance_sg (AWS)</option>
-                                    <option value="terminate_instance">terminate_instance (AWS)</option>
-                                    <option value="block_ip">block_ip (AWS)</option>
-                                    <option value="revoke_role_sessions">revoke_role_sessions (AWS)</option>
+                                    <option value="disable_access_key" data-provider="aws">disable_access_key (AWS)</option>
+                                    <option value="attach_deny_all_to_principal" data-provider="aws">attach_deny_all_to_principal (AWS)</option>
+                                    <option value="isolate_instance_sg" data-provider="aws">isolate_instance_sg (AWS)</option>
+                                    <option value="terminate_instance" data-provider="aws">terminate_instance (AWS)</option>
+                                    <option value="block_ip" data-provider="aws">block_ip (AWS)</option>
+                                    <option value="revoke_role_sessions" data-provider="aws">revoke_role_sessions (AWS)</option>
                                     <!-- K8s -->
-                                    <option value="isolate_pod">isolate_pod (Kubernetes)</option>
-                                    <option value="cordon_node">cordon_node (Kubernetes)</option>
-                                    <option value="delete_pod">delete_pod (Kubernetes)</option>
-                                    <option value="scale_deployment_zero">scale_deployment_zero (Kubernetes)</option>
+                                    <option value="isolate_pod" data-provider="kubernetes">isolate_pod (Kubernetes)</option>
+                                    <option value="cordon_node" data-provider="kubernetes">cordon_node (Kubernetes)</option>
+                                    <option value="delete_pod" data-provider="kubernetes">delete_pod (Kubernetes)</option>
+                                    <option value="scale_deployment_zero" data-provider="kubernetes">scale_deployment_zero (Kubernetes)</option>
                                 </select>
                             </div>
                             <div class="form-group">
@@ -250,6 +250,7 @@
                 <input type="hidden" id="modal-action-type"> <!-- "approve" | "deny" | "promote" | "demote" | "reassign" -->
                 <input type="hidden" id="modal-action-class"> <!-- optional -->
                 <input type="hidden" id="modal-expires-in"> <!-- optional, promote only -->
+                <input type="hidden" id="modal-provider"> <!-- optional, promote only -->
 
                 <div class="form-group">
                     <label for="auth-operator-id">Operator ID</label>

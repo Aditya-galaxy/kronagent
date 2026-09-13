@@ -54,6 +54,12 @@ hard part. Kronagent's answer is **earn-trust, graduated autonomy**:
   renewal lifts it. Otherwise a class promoted while classified destructive
   (recorded but inert behind the ceiling) would go live unattended the day the
   table relaxed it.
+- **A promotion covers the providers it was earned on.** `block_ip` can be
+  carried out by five providers, from a Cloudflare edge rule to an AWS network
+  ACL, so a class more than one provider can carry out can't be promoted
+  without naming which ones (`promote.py add block_ip --provider aws`). The
+  gate refuses the entry on any other provider. Entries written before scoping
+  still cover every provider, as they always did, and review flags them.
 - **The policy engine is the hard ceiling, not a suggestion.** Actions are
   classified by reversibility and blast radius. Destructive or wide-blast
   actions (terminate an instance, delete a pod, scale a deployment to zero)

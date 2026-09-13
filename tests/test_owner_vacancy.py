@@ -131,7 +131,7 @@ def store(tmp_path) -> AllowlistStore:
 async def test_the_gate_refuses_an_entry_whose_owner_left_before_any_sweep(
         store, audit_log, registry) -> None:
     check = owner_vacancy_checker(str(registry), "default")
-    await store.add(ActionClass.BLOCK_IP, by="alice", owner="dana", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", owner="dana", reason="r", audit=audit_log,
                     owner_check=check)
     assert store.is_allowed(ActionClass.BLOCK_IP, owner_check=check) is True
 
@@ -145,7 +145,7 @@ async def test_the_gate_refuses_an_entry_whose_owner_left_before_any_sweep(
 async def test_the_sweep_latches_once_and_reinstating_the_owner_does_not_undo_it(
         store, audit_log, registry) -> None:
     check = owner_vacancy_checker(str(registry), "default")
-    await store.add(ActionClass.BLOCK_IP, by="alice", owner="dana", reason="quiet for 30d",
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", owner="dana", reason="quiet for 30d",
                     audit=audit_log, owner_check=check)
     store.record_fired(ActionClass.BLOCK_IP)
     _edit(registry, "dana", delete=True)
@@ -172,7 +172,7 @@ async def test_the_sweep_latches_once_and_reinstating_the_owner_does_not_undo_it
 async def test_an_unreadable_registry_refuses_at_the_gate_but_latches_nothing(
         store, audit_log, registry) -> None:
     check = owner_vacancy_checker(str(registry), "default")
-    await store.add(ActionClass.BLOCK_IP, by="alice", owner="dana", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", owner="dana", reason="r", audit=audit_log,
                     owner_check=check)
     original = registry.read_text()
     registry.write_text("{truncated")
@@ -186,7 +186,7 @@ async def test_an_unreadable_registry_refuses_at_the_gate_but_latches_nothing(
 
 
 async def test_the_sweep_without_a_directory_does_nothing(store, audit_log) -> None:
-    await store.add(ActionClass.BLOCK_IP, by="ghost", reason="r", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="ghost", reason="r", audit=audit_log)
     assert await store.suspend_vacant_owners(audit=audit_log, owner_check=None) == []
     assert store.is_allowed(ActionClass.BLOCK_IP) is True
 
@@ -197,7 +197,7 @@ async def test_the_sweep_without_a_directory_does_nothing(store, audit_log) -> N
 
 async def _suspended(store, audit_log, registry):
     check = owner_vacancy_checker(str(registry), "default")
-    await store.add(ActionClass.BLOCK_IP, by="alice", owner="dana", reason="r", audit=audit_log,
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", owner="dana", reason="r", audit=audit_log,
                     owner_check=check)
     _edit(registry, "dana", active=False)
     await store.suspend_vacant_owners(audit=audit_log, owner_check=check)
@@ -232,7 +232,7 @@ async def test_a_reassignment_does_not_lift_a_suspension_it_does_not_answer(
     """Handing an entry to a new owner answers "who is accountable" — not
     whatever else withdrew its authority."""
     check = owner_vacancy_checker(str(registry), "default")
-    await store.add(ActionClass.BLOCK_IP, by="alice", owner="dana", reason="r", audit=audit_log)
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", owner="dana", reason="r", audit=audit_log)
     raw = store._read_all()
     raw["block_ip"].update(suspended_at="2026-09-01T00:00:00+00:00",
                            suspended_trigger="some_other_trigger",
@@ -249,14 +249,14 @@ async def test_renewing_onto_the_departed_owner_is_refused(store, audit_log, reg
     has left would re-arm an entry with nobody to ask."""
     check = await _suspended(store, audit_log, registry)
     with pytest.raises(OwnerNotInStandingError):
-        await store.add(ActionClass.BLOCK_IP, by="alice", reason="still needed", audit=audit_log,
+        await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", reason="still needed", audit=audit_log,
                         owner_check=check)
     assert store.list()[0].is_suspended is True
 
 
 async def test_renewing_with_a_new_owner_lifts_the_suspension(store, audit_log, registry) -> None:
     check = await _suspended(store, audit_log, registry)
-    await store.add(ActionClass.BLOCK_IP, by="alice", owner="alice", reason="still needed",
+    await store.add(ActionClass.BLOCK_IP, providers=["aws"], by="alice", owner="alice", reason="still needed",
                     audit=audit_log, owner_check=check)
     assert store.is_allowed(ActionClass.BLOCK_IP, owner_check=check) is True
     assert _governance(audit_log, "allowlist_add")[-1]["payload"]["lifted_suspension"]
@@ -409,12 +409,12 @@ def _cli(args: list[str], tmp_path, registry) -> subprocess.CompletedProcess:
 
 def test_cli_refuses_an_owner_not_in_standing_and_suspends_on_departure(tmp_path, registry) -> None:
     auth = ["--as", "alice", "--token", "secret"]
-    refused = _cli(["add", "block_ip", *auth, "--reason", "r", "--owner", "mallory"],
+    refused = _cli(["add", "block_ip", "--provider", "aws", *auth, "--reason", "r", "--owner", "mallory"],
                    tmp_path, registry)
     assert refused.returncode == 2
     assert "mallory" in refused.stderr
 
-    assert _cli(["add", "block_ip", *auth, "--reason", "r", "--owner", "dana"],
+    assert _cli(["add", "block_ip", "--provider", "aws", *auth, "--reason", "r", "--owner", "dana"],
                 tmp_path, registry).returncode == 0
     _edit(registry, "dana", active=False)
 

@@ -62,9 +62,10 @@ from typing import Optional
 
 from kronagent.allowlist import (
     DEFAULT_STALE_AFTER_DAYS, AllowlistEntry, AllowlistStore, DurationError,
-    OwnerNotInStandingError, parse_duration, parse_ts,
+    OwnerNotInStandingError, ProviderScopeError, parse_duration, parse_ts,
 )
 from kronagent.audit import AuditLog
+from kronagent.classification import providers_for
 from kronagent.config import Settings
 from kronagent.identity import (
     DEFAULT_TENANT, AuthContext, AuthorizationError, Permission, owner_vacancy_checker,
@@ -185,6 +186,21 @@ def _standing_flags(e: AllowlistEntry, owner_check, now: datetime) -> list[str]:
     return []
 
 
+def _providers(action_class: str) -> list[str]:
+    try:
+        return sorted(providers_for(ActionClass(action_class)))
+    except ValueError:
+        return []
+
+
+def _scope_phrase(e: AllowlistEntry) -> str:
+    if e.provider_scope is not None:
+        return ", ".join(e.provider_scope)
+    everything = _providers(e.action_class)
+    return (f"every provider ({', '.join(everything)}) — written before scoping"
+            if everything else "nothing (unknown action class)")
+
+
 def _refuse_owner(exc: OwnerNotInStandingError) -> int:
     print(f"REFUSED: {exc}. An entry can only be owned by an active operator with the "
           f"promote permission on this tenant — someone who could renew it. "
@@ -215,6 +231,7 @@ def cmd_list(store: AllowlistStore, settings: Settings) -> int:
         suffix = "".join(f"  {f}" for f in flags)
         print(f"  {e.action_class:32} owned by {e.owner}{suffix}")
         print(f"      promoted by {e.promoted_by} at {e.promoted_at}")
+        print(f"      covers: {_scope_phrase(e)}")
         print(f"      reason: {e.reason}")
         print(f"      expires: {_expiry_phrase(e, now)}")
         print(f"      last fired: {_fired_phrase(e, now)}")
@@ -270,6 +287,8 @@ def cmd_review(store: AllowlistStore, audit: AuditLog, settings: Settings,
                 reasons.append("reclassified")
             elif owner_check is not None and owner_check(e.owner) is not None:
                 reasons.append("owner not in standing")
+        if e.provider_scope is None and len(_providers(e.action_class)) > 1:
+            reasons.append("covers every provider — renew with --provider to scope it")
         if e.classification is None and _is_auto_eligible(policy, e.action_class) is not None:
             # Predates pinning: a reclassification would go unnoticed for it.
             reasons.append("classification not pinned — renew to pin it")
@@ -311,6 +330,7 @@ def cmd_review(store: AllowlistStore, audit: AuditLog, settings: Settings,
         print(f"\n{marker} {e.action_class}")
         print(f"    owner        {e.owner} — ask them to renew")
         print(f"    promoted by  {e.promoted_by} at {e.promoted_at} ({_ago(e.promoted_at, now)})")
+        print(f"    covers       {_scope_phrase(e)}")
         print(f"    reason       {e.reason}")
         print(f"    expires      {_expiry_phrase(e, now)}")
         print(f"    last fired   {_fired_phrase(e, now)}")
@@ -376,12 +396,19 @@ def cmd_add(store: AllowlistStore, audit: AuditLog, settings: Settings,
     try:
         entry = asyncio.run(store.add(ac, by=actor.operator_id, reason=args.reason, audit=audit,
                                       actor_fields=actor.audit_fields(), expires_in=expires_in,
-                                      owner=args.owner, owner_check=_owner_check(settings)))
+                                      owner=args.owner, owner_check=_owner_check(settings),
+                                      providers=args.providers))
     except OwnerNotInStandingError as exc:
         return _refuse_owner(exc)
+    except ProviderScopeError as exc:
+        print(f"REFUSED: {exc}. Pass --provider for each one, e.g. --provider aws.",
+              file=sys.stderr)
+        return 2
     verb = "Renewed" if renewal else "Promoted"
     print(f"{verb} {entry.action_class} to autonomous execution (by {actor.label}).")
     print(f"  Owner: {entry.owner} — the one asked to renew it, and the one who says yes again.")
+    print(f"  Covers: {', '.join(entry.provider_scope or [])} — the gate refuses it on any other "
+          f"provider.")
     if entry.expires_at:
         print(f"  Expires {entry.expires_at} ({args.expires_in}) — after that it requires human "
               f"approval again until an operator renews it.")
@@ -515,6 +542,11 @@ def main() -> int:
                        help="who is accountable for this entry and gets asked to renew it. "
                             "Defaults to the promoter; on a renewal, defaults to the existing "
                             "owner. Reassign later with `reassign`.")
+
+    p_add.add_argument("--provider", dest="providers", action="append", metavar="PROVIDER",
+                       help="a provider this promotion covers; repeat for several. Required for "
+                            "a class more than one provider can carry out (e.g. block_ip). On a "
+                            "renewal, defaults to the entry's existing scope.")
 
     p_rm = sub.add_parser("remove", help="demote an action class back to requiring approval")
     p_rm.add_argument("action_class")

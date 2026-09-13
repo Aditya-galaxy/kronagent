@@ -24,7 +24,9 @@ from .config import Settings
 from .approvals import ApprovalStore, now_iso
 from .outcomes import OutcomeStore
 from .shadow import build_report, calls_from_audit
-from .allowlist import AllowlistStore, DurationError, OwnerNotInStandingError, parse_duration
+from .allowlist import (
+    AllowlistStore, DurationError, OwnerNotInStandingError, ProviderScopeError, parse_duration,
+)
 from .audit import AuditLog
 from .insights import insight_tags
 from .provenance import provenance_map, review_banner
@@ -36,6 +38,7 @@ from .identity import (
     owner_vacancy_checker,
     resolve_actor,
 )
+from .classification import providers_for
 from .policy import PolicyEngine
 from .containment import ContainmentExecutor
 from .providers import build_containment_adapters
@@ -235,6 +238,9 @@ class PromoteRequest(BaseModel):
     # Who is accountable for the entry and gets asked to renew it. Defaults to
     # the promoter (and, on a renewal, to the existing owner). Ignored on demote.
     owner: Optional[str] = None
+    # Providers the promotion covers. Required for a class more than one
+    # provider can carry out; a renewal defaults to the existing scope.
+    providers: Optional[list[str]] = None
 
 
 class ReassignRequest(BaseModel):
@@ -609,6 +615,7 @@ def review_allowlist(request: Request) -> list[dict[str, Any]]:
         props = policy._properties(ac)
         return {
             "known_action_class": True,
+            "providers_available": sorted(providers_for(ac)),
             "auto_eligible": policy.is_auto_eligible(ac),
             "reversible": props["reversible"],
             "blast_radius": props["blast_radius"].value,
@@ -683,17 +690,21 @@ async def promote_allowlist_class(req: PromoteRequest, request: Request) -> dict
             expires_in=expires_in,
             owner=req.owner,
             owner_check=owner_vacancy_checker(settings.operator_registry_path, tenant_id),
+            providers=req.providers,
         )
     except OwnerNotInStandingError as exc:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot promote {ac.value}: {exc}. Name an owner who can renew it.",
         )
+    except ProviderScopeError as exc:
+        raise HTTPException(status_code=400, detail=f"Cannot promote {ac.value}: {exc}.")
     detail = f"Class {ac.value} successfully promoted."
     if entry.expires_at:
         detail += f" Expires {entry.expires_at}; requires renewal after that."
     return {"status": "success", "detail": detail,
-            "expires_at": entry.expires_at, "owner": entry.owner}
+            "expires_at": entry.expires_at, "owner": entry.owner,
+            "provider_scope": entry.provider_scope}
 
 
 @app.post("/api/allowlist/reassign")

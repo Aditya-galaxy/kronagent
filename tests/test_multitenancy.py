@@ -180,7 +180,7 @@ async def test_policy_allowlist_tenant_isolation(temp_settings_dir) -> None:
     allowlist_a = AllowlistStore(get_tenant_path(allowlist_path, "tenant-a"))
     from kronagent.audit import AuditLog
     audit_a = AuditLog(os.path.join(temp_settings_dir, "audit_a.jsonl"))
-    await allowlist_a.add(ActionClass.BLOCK_IP, by="admin", reason="approved", audit=audit_a)
+    await allowlist_a.add(ActionClass.BLOCK_IP, providers=["aws"], by="admin", reason="approved", audit=audit_a)
     
     # 4. Check policy decision for tenant-a (should be auto_execute)
     action = ProposedAction(

@@ -104,7 +104,7 @@ class PolicyEngine:
         # owner can keep their job and still lose access to this customer.
         owner_check = owner_vacancy_checker(s.operator_registry_path, action.tenant_id)
         allowlisted, entry_refusal = actual_allowlist.evaluate(
-            action.action_class, owner_check=owner_check,
+            action.action_class, owner_check=owner_check, provider=action.provider,
         )
 
         if auto_eligible and allowlisted:

@@ -80,9 +80,15 @@ class FakeContainmentAdapter:
 
 
 def make_action(
-    *, provider: str = "fake", action_class, target: str = "target-1",
+    *, provider: Optional[str] = None, action_class, target: str = "target-1",
     rationale: str = "test rationale", parameters: Optional[dict] = None,
 ) -> ProposedAction:
+    # Default to a provider that can actually carry the class out: allowlist
+    # entries are scoped to providers, so an action on a made-up one would be
+    # refused for reasons no test meant to exercise.
+    if provider is None:
+        from kronagent.classification import providers_for
+        provider = min(providers_for(action_class), default="fake")
     return ProposedAction(
         provider=provider, action_class=action_class, target=target,
         rationale=rationale, parameters=parameters or {},
