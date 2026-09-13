@@ -62,11 +62,14 @@ from typing import Optional
 
 from kronagent.allowlist import (
     DEFAULT_STALE_AFTER_DAYS, AllowlistEntry, AllowlistStore, DurationError,
-    parse_duration, parse_ts,
+    OwnerNotInStandingError, parse_duration, parse_ts,
 )
 from kronagent.audit import AuditLog
 from kronagent.config import Settings
-from kronagent.identity import AuthContext, AuthorizationError, Permission, resolve_actor
+from kronagent.identity import (
+    DEFAULT_TENANT, AuthContext, AuthorizationError, Permission, owner_vacancy_checker,
+    resolve_actor,
+)
 from kronagent.policy import PolicyEngine
 from kronagent.schemas import ActionClass, AuditRecord
 
@@ -162,17 +165,42 @@ def _is_auto_eligible(policy: PolicyEngine, action_class: str) -> Optional[bool]
         return None
 
 
+def _owner_check(settings: Settings):
+    # This CLI governs the default tenant's store (settings.allowlist_store_path).
+    return owner_vacancy_checker(settings.operator_registry_path, DEFAULT_TENANT)
+
+
+def _standing_flags(e: AllowlistEntry, owner_check, now: datetime) -> list[str]:
+    """Why an unexpired entry grants nothing despite being on file."""
+    if e.is_expired(now):
+        return []
+    if e.is_suspended:
+        return [f"SUSPENDED — {e.suspended_reason}"]
+    vacancy = owner_check(e.owner) if owner_check else None
+    if vacancy is not None:
+        return [f"OWNER NOT IN STANDING — {vacancy.reason}"]
+    return []
+
+
+def _refuse_owner(exc: OwnerNotInStandingError) -> int:
+    print(f"REFUSED: {exc}. An entry can only be owned by an active operator with the "
+          f"promote permission on this tenant — someone who could renew it. "
+          f"Name one with --owner.", file=sys.stderr)
+    return 2
+
+
 def cmd_list(store: AllowlistStore, settings: Settings) -> int:
     entries = store.list()
     if not entries:
         print("Allowlist is EMPTY — every action requires human approval.")
         return 0
     policy = PolicyEngine(settings, store)
+    owner_check = _owner_check(settings)
     now = datetime.now().astimezone()
     print("Auto-execute allowlist:")
     for e in entries:
         eligible = _is_auto_eligible(policy, e.action_class)
-        flags = []
+        flags = [f"⚠ {flag}" for flag in _standing_flags(e, owner_check, now)]
         if eligible is None:
             flags.append("⚠ UNKNOWN action class — not in the taxonomy, grants nothing")
         elif not eligible:
@@ -226,11 +254,17 @@ def cmd_review(store: AllowlistStore, audit: AuditLog, settings: Settings,
 
     entries = store.list()
     policy = PolicyEngine(settings, store)
+    owner_check = _owner_check(settings)
     now = datetime.now().astimezone()
 
     flagged: dict[str, list[str]] = {}
     for e in entries:
         reasons = []
+        if not e.is_expired(now):
+            if e.is_suspended:
+                reasons.append("suspended")
+            elif owner_check is not None and owner_check(e.owner) is not None:
+                reasons.append("owner not in standing")
         if e.is_expired(now):
             reasons.append("expired")
         else:
@@ -254,6 +288,9 @@ def cmd_review(store: AllowlistStore, audit: AuditLog, settings: Settings,
     print(f"Allowlist review — {len(entries)} entr{'y' if len(entries) == 1 else 'ies'}, "
           f"reviewed by {actor.label} at {now.isoformat(timespec='seconds')}")
     print(f"(stale threshold: {args.stale_after}; expiry warning window: {args.expiring_within})")
+    if owner_check is None and entries:
+        print("(owner standing NOT checked — no operator registry, so nothing notices an owner "
+              "leaving)")
     if not entries:
         print("\nAllowlist is EMPTY — every action requires human approval. Nothing to review.")
     for e in entries:
@@ -269,6 +306,8 @@ def cmd_review(store: AllowlistStore, audit: AuditLog, settings: Settings,
         print(f"    reason       {e.reason}")
         print(f"    expires      {_expiry_phrase(e, now)}")
         print(f"    last fired   {_fired_phrase(e, now)}")
+        for flag in _standing_flags(e, owner_check, now):
+            print(f"    STANDING     {flag}")
         if reasons:
             print(f"    ATTENTION    {', '.join(reasons)}")
             print(f"    renew:  python3 promote.py add {e.action_class} "
@@ -326,9 +365,12 @@ def cmd_add(store: AllowlistStore, audit: AuditLog, settings: Settings,
     expires_in = _parse_window(args.expires_in, "--expires-in") if args.expires_in else None
     policy = PolicyEngine(settings, store)
     renewal = any(e.action_class == ac.value for e in store.list())
-    entry = asyncio.run(store.add(ac, by=actor.operator_id, reason=args.reason, audit=audit,
-                                  actor_fields=actor.audit_fields(), expires_in=expires_in,
-                                  owner=args.owner))
+    try:
+        entry = asyncio.run(store.add(ac, by=actor.operator_id, reason=args.reason, audit=audit,
+                                      actor_fields=actor.audit_fields(), expires_in=expires_in,
+                                      owner=args.owner, owner_check=_owner_check(settings)))
+    except OwnerNotInStandingError as exc:
+        return _refuse_owner(exc)
     verb = "Renewed" if renewal else "Promoted"
     print(f"{verb} {entry.action_class} to autonomous execution (by {actor.label}).")
     print(f"  Owner: {entry.owner} — the one asked to renew it, and the one who says yes again.")
@@ -415,12 +457,16 @@ def cmd_warn_expiring(store: AllowlistStore, audit: AuditLog, settings: Settings
     return 0
 
 
-def cmd_reassign(store: AllowlistStore, audit: AuditLog, actor: AuthContext,
-                 args: argparse.Namespace) -> int:
+def cmd_reassign(store: AllowlistStore, audit: AuditLog, settings: Settings,
+                 actor: AuthContext, args: argparse.Namespace) -> int:
     ac = _parse_action_class(args.action_class)
-    entry = asyncio.run(store.set_owner(ac, owner=args.to, by=actor.operator_id,
-                                        reason=args.reason, audit=audit,
-                                        actor_fields=actor.audit_fields()))
+    try:
+        entry = asyncio.run(store.set_owner(ac, owner=args.to, by=actor.operator_id,
+                                            reason=args.reason, audit=audit,
+                                            actor_fields=actor.audit_fields(),
+                                            owner_check=_owner_check(settings)))
+    except OwnerNotInStandingError as exc:
+        return _refuse_owner(exc)
     if entry is None:
         print(f"{ac.value} is not on the allowlist — nothing to reassign "
               f"(no-op, still recorded for the audit trail).")
@@ -506,6 +552,11 @@ def main() -> int:
     for lapsed in asyncio.run(store.expire_due(audit=audit)):
         print(f"EXPIRED: {lapsed.action_class} — TTL elapsed at {lapsed.expires_at}; it requires "
               f"human approval again until renewed (recorded in the audit log).", file=sys.stderr)
+    for entry, vacancy in asyncio.run(store.suspend_vacant_owners(
+            audit=audit, owner_check=_owner_check(settings))):
+        print(f"SUSPENDED: {entry.action_class} — {vacancy.reason}; it requires human approval "
+              f"until renewed with an owner in standing or reassigned (recorded in the audit "
+              f"log).", file=sys.stderr)
 
     if args.command == "list":
         return cmd_list(store, settings)
@@ -521,7 +572,7 @@ def main() -> int:
         # PROMOTE, not VIEW: moving ownership moves who can renew the entry,
         # which is a governance change even though the entry itself is untouched.
         actor = _resolve(settings, audit, args, Permission.PROMOTE)
-        return cmd_reassign(store, audit, actor, args)
+        return cmd_reassign(store, audit, settings, actor, args)
     if args.command == "review":
         # Reviewing is a read, so VIEW is enough — but it is an attributed one:
         # the point of the command is that someone looked, and the audit log

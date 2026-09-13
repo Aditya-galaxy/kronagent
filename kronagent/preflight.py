@@ -39,7 +39,7 @@ from typing import Literal, Optional
 from .allowlist import AllowlistStore
 from .audit import AuditLog
 from .config import Settings
-from .identity import registry_configured
+from .identity import DEFAULT_TENANT, owner_vacancy_checker, registry_configured
 from .policy import _ACTION_PROPERTIES
 from .schemas import ActionClass
 
@@ -402,6 +402,44 @@ def _check_governance(settings: Settings, store: AllowlistStore) -> list[Check]:
             section="governance",
         ))
 
+    suspended = [e for e in entries if e.is_suspended and not e.is_expired()]
+    if suspended:
+        checks.append(Check(
+            "allowlist:suspended", "warn",
+            "; ".join(f"{e.action_class} ({e.suspended_reason})" for e in suspended)
+            + " — suspended, no longer granting autonomy.",
+            fix="Renew with promote.py add --owner <someone in standing>, reassign with "
+                "promote.py reassign --to, or drop with promote.py remove.",
+            section="governance",
+        ))
+
+    owner_check = owner_vacancy_checker(settings.operator_registry_path, DEFAULT_TENANT)
+    vacant: dict[str, str] = {}
+    if owner_check is None:
+        if active:
+            checks.append(Check(
+                "allowlist:owners", "warn",
+                "Owner standing is not checked — there is no operator registry, so nothing "
+                "notices when an entry's owner leaves. (OIDC alone cannot answer this: it "
+                "only knows people while they are signing in.)",
+                fix="Configure KRONAGENT_OPERATOR_REGISTRY listing every entry owner.",
+                section="governance",
+            ))
+    else:
+        for e in active:
+            vacancy = owner_check(e.owner)
+            if vacancy is not None:
+                vacant[e.action_class] = vacancy.reason
+        if vacant:
+            checks.append(Check(
+                "allowlist:owners", "fail",
+                "; ".join(f"{ac}: {why}" for ac, why in sorted(vacant.items()))
+                + " — refused at the gate, and suspended on the next pipeline run.",
+                fix="Hand each to an owner in standing with promote.py reassign --to, or "
+                    "drop it with promote.py remove.",
+                section="governance",
+            ))
+
     no_ttl = [e.action_class for e in active if not e.expires_at]
     if no_ttl:
         checks.append(Check(
@@ -415,8 +453,9 @@ def _check_governance(settings: Settings, store: AllowlistStore) -> list[Check]:
     # The headline number: what can actually run unattended right now.
     autonomous = sorted(
         e.action_class for e in active
-        if _ACTION_PROPERTIES.get(ActionClass(e.action_class), {}).get("destructive") is False
-        and e.action_class in {ac.value for ac in ActionClass}
+        if e.action_class in {ac.value for ac in ActionClass}
+        and e.action_class not in vacant
+        and _ACTION_PROPERTIES.get(ActionClass(e.action_class), {}).get("destructive") is False
     )
     if autonomous and not settings.dry_run:
         checks.append(Check(

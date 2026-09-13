@@ -46,6 +46,15 @@ this platform's safety case rests on. Three mechanisms close it:
   * **Last-fired tracking.** `record_fired()` is called when an entry actually
     authorizes an autonomous execution. An entry that never fires is standing
     authority with no benefit — the worst kind to leave lying around.
+  * **Owner vacancy.** An owner who leaves the operator registry, is
+    deactivated, loses PROMOTE, or loses access to the tenant can no longer
+    renew anything — so the entry stops holding authority the moment that is
+    true (`evaluate` refuses it at the gate), and the sweep
+    `suspend_vacant_owners()` latches it as a suspension in the audit chain.
+    A suspension is not a deletion: the entry stays, carrying its history,
+    until someone with PROMOTE renews it or hands it to an owner who is still
+    here. Reinstating the old owner does not lift it on its own — a quiet edit
+    to a registry file is not a decision anyone made about autonomy.
   * **Review.** Everything a periodic review needs (who owns it, who promoted
     it, when, why, when it last fired, when it lapses) travels on the entry, so
     `promote.py review` can ask "does this still apply?" with the context in
@@ -80,6 +89,7 @@ from pydantic import (
 )
 
 from .audit import AuditLog
+from .identity import OwnerVacancy
 from .schemas import ActionClass, AuditRecord, utcnow_iso
 
 # An entry that has not fired in this long is flagged by `promote.py review`.
@@ -89,6 +99,22 @@ DEFAULT_STALE_AFTER_DAYS = 30
 
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhdw])\s*$", re.IGNORECASE)
+
+
+# Asks whether an owner may still hold an entry; None means yes. Built per
+# tenant by `identity.owner_vacancy_checker`, injected so the store never reads
+# the operator registry itself.
+OwnerCheck = Callable[[str], Optional[OwnerVacancy]]
+
+SUSPENDED_OWNER_VACANT = "owner_vacant"
+
+
+class OwnerNotInStandingError(ValueError):
+    """Refused to name an owner who could not renew the entry they'd own."""
+
+    def __init__(self, vacancy: OwnerVacancy) -> None:
+        super().__init__(vacancy.reason)
+        self.vacancy = vacancy
 
 
 class DurationError(ValueError):
@@ -159,6 +185,12 @@ class AllowlistEntry(BaseModel):
     # Set by record_fired() when this entry authorizes an autonomous execution.
     last_fired_at: Optional[str] = None
     fire_count: int = 0
+    # Set when something other than the clock withdrew this entry's authority
+    # (today: its owner left). The entry is kept so the fix — renew, or hand it
+    # to someone still here — has the history in front of it.
+    suspended_at: Optional[str] = None
+    suspended_trigger: Optional[str] = None
+    suspended_reason: Optional[str] = None
 
     @model_validator(mode="after")
     def _default_owner_to_promoter(self) -> "AllowlistEntry":
@@ -174,6 +206,10 @@ class AllowlistEntry(BaseModel):
             # autonomy — so fail closed and treat it as already lapsed.
             return bool(self.expires_at)
         return (now or _utcnow()) >= expiry
+
+    @property
+    def is_suspended(self) -> bool:
+        return self.suspended_at is not None
 
     def is_stale(self, *, after_days: int = DEFAULT_STALE_AFTER_DAYS,
                  now: Optional[datetime] = None) -> bool:
@@ -222,18 +258,40 @@ class AllowlistStore:
                 os.remove(tmp)
 
     # --- read path used by PolicyEngine on every decision ---
-    def is_allowed(self, action_class: ActionClass, *, now: Optional[datetime] = None) -> bool:
-        """An expired entry is not allowed, whether or not the expiry sweep has
-        run yet. The lapse of autonomy is enforced here, at the gate; the sweep
-        only records it. Nothing about production safety waits on a cron."""
+    def evaluate(
+        self, action_class: ActionClass, *, now: Optional[datetime] = None,
+        owner_check: Optional[OwnerCheck] = None,
+    ) -> tuple[bool, Optional[str]]:
+        """Whether this class is authorized for autonomy right now, and if an
+        entry exists but does not hold, why not.
+
+        Everything that withdraws authority is enforced here, at the gate, and
+        none of it waits for a sweep: an expired TTL, a latched suspension, and
+        an owner who is no longer in standing. The sweeps only record what this
+        already refuses. `(False, None)` means there is simply no entry.
+        """
         raw = self._read_all().get(action_class.value)
         if raw is None:
-            return False
+            return False, None
         try:
             entry = AllowlistEntry.model_validate(raw)
         except ValidationError:
-            return False  # unreadable entry grants nothing
-        return not entry.is_expired(now)
+            return False, "allowlist entry is unreadable"  # grants nothing
+        if entry.is_expired(now):
+            return False, f"allowlist entry expired at {entry.expires_at}"
+        if entry.is_suspended:
+            return False, f"allowlist entry suspended: {entry.suspended_reason}"
+        if owner_check is not None:
+            vacancy = owner_check(entry.owner)
+            if vacancy is not None:
+                return False, f"allowlist entry has no owner in standing: {vacancy.reason}"
+        return True, None
+
+    def is_allowed(
+        self, action_class: ActionClass, *, now: Optional[datetime] = None,
+        owner_check: Optional[OwnerCheck] = None,
+    ) -> bool:
+        return self.evaluate(action_class, now=now, owner_check=owner_check)[0]
 
     def list(self) -> list[AllowlistEntry]:
         """Every entry on file, expired ones included — `promote.py review`
@@ -250,7 +308,10 @@ class AllowlistStore:
         return sorted(entries, key=lambda e: e.action_class)
 
     def active(self, *, now: Optional[datetime] = None) -> list[AllowlistEntry]:
-        return [e for e in self.list() if not e.is_expired(now)]
+        """Entries neither expired nor suspended. Owner standing is not applied
+        here — it needs a directory — so the policy gate remains the authority
+        on what actually executes."""
+        return [e for e in self.list() if not e.is_expired(now) and not e.is_suspended]
 
     def expired(self, *, now: Optional[datetime] = None) -> list[AllowlistEntry]:
         return [e for e in self.list() if e.is_expired(now)]
@@ -260,7 +321,13 @@ class AllowlistStore:
         self, action_class: ActionClass, *, by: str, reason: str, audit: AuditLog,
         actor_fields: Optional[dict] = None, expires_in: Optional[timedelta] = None,
         owner: Optional[str] = None, now: Optional[datetime] = None,
+        owner_check: Optional[OwnerCheck] = None,
     ) -> AllowlistEntry:
+        """Promote a class, or renew it. A renewal is a fresh decision, so it
+        also lifts any suspension — but only onto an owner who is in standing:
+        with `owner_check`, naming (or inheriting) an owner who has left raises
+        `OwnerNotInStandingError` and writes nothing, since the entry would be
+        suspended again on the next sweep with nobody to ask."""
         expires_at = ((now or _utcnow()) + expires_in).isoformat() if expires_in else None
         entry = AllowlistEntry(
             action_class=action_class.value, promoted_by=by, reason=reason,
@@ -279,6 +346,10 @@ class AllowlistStore:
             entry.fire_count = previous.get("fire_count") or 0
             if not owner:
                 entry.owner = previous.get("owner") or by
+        if owner_check is not None:
+            vacancy = owner_check(entry.owner)
+            if vacancy is not None:
+                raise OwnerNotInStandingError(vacancy)
         data[action_class.value] = entry.model_dump()
         self._write_all(data)
         await audit.record(AuditRecord(
@@ -287,6 +358,7 @@ class AllowlistStore:
                 "decision": "allowlist_add", "action_class": action_class.value,
                 "by": by, "reason": reason, "already_present": previous is not None,
                 "expires_at": expires_at, "owner": entry.owner,
+                "lifted_suspension": (previous or {}).get("suspended_reason"),
                 **(actor_fields or {}),
             },
         ))
@@ -294,7 +366,7 @@ class AllowlistStore:
 
     async def set_owner(
         self, action_class: ActionClass, *, owner: str, by: str, reason: str, audit: AuditLog,
-        actor_fields: Optional[dict] = None,
+        actor_fields: Optional[dict] = None, owner_check: Optional[OwnerCheck] = None,
     ) -> Optional[AllowlistEntry]:
         """Hand an entry to a new accountable owner.
 
@@ -303,12 +375,26 @@ class AllowlistStore:
         they were — the history stays true, and there is still a named person
         to ask at renewal time. Audited like any other governance change, since
         it changes who can say yes.
+
+        Handing an entry to an owner in standing lifts an owner-vacancy
+        suspension — that is the fix for exactly that problem — and nothing
+        else: a reassignment answers "who is accountable", not "does this still
+        apply". With `owner_check`, reassigning to someone not in standing
+        raises `OwnerNotInStandingError` and writes nothing.
         """
+        if owner_check is not None:
+            vacancy = owner_check(owner)
+            if vacancy is not None:
+                raise OwnerNotInStandingError(vacancy)
         data = self._read_all()
         raw = data.get(action_class.value)
         previous_owner = (raw or {}).get("owner") or (raw or {}).get("promoted_by") or ""
+        lifted = None
         if raw is not None:
             raw["owner"] = owner
+            if raw.get("suspended_trigger") == SUSPENDED_OWNER_VACANT:
+                lifted = raw.get("suspended_reason")
+                raw["suspended_at"] = raw["suspended_trigger"] = raw["suspended_reason"] = None
             self._write_all(data)
         await audit.record(AuditRecord(
             finding_id="_governance", stage="governance",
@@ -316,6 +402,7 @@ class AllowlistStore:
                 "decision": "allowlist_reassign", "action_class": action_class.value,
                 "by": by, "reason": reason, "owner": owner,
                 "previous_owner": previous_owner, "existed": raw is not None,
+                "lifted_suspension": lifted,
                 **(actor_fields or {}),
             },
         ))
@@ -380,6 +467,57 @@ class AllowlistStore:
                 },
             ))
         return lapsed
+
+    async def suspend_vacant_owners(
+        self, *, audit: AuditLog, owner_check: Optional[OwnerCheck],
+        now: Optional[datetime] = None,
+    ) -> list[tuple[AllowlistEntry, OwnerVacancy]]:
+        """Latch a suspension on every entry whose owner has definitively left.
+
+        The gate already refuses these; this makes the withdrawal a recorded
+        governance event and makes it stick. Without the latch, autonomy would
+        come back the moment someone re-added a name to the registry file —
+        an edit nobody audits, standing in for a decision nobody made.
+
+        A vacancy that is not definitive (the registry could not be read) is
+        refused at the gate but never latched: a broken file has not made
+        anyone leave. Idempotent — an already-suspended entry is skipped, so
+        one departure produces exactly one record per entry.
+        """
+        if owner_check is None:
+            return []
+        now = now or _utcnow()
+        data = self._read_all()
+        suspended = []
+        for entry in self.list():
+            if entry.is_expired(now) or entry.is_suspended:
+                continue
+            vacancy = owner_check(entry.owner)
+            if vacancy is None or not vacancy.definitive:
+                continue
+            raw = data[entry.action_class]
+            raw["suspended_at"] = now.isoformat()
+            raw["suspended_trigger"] = SUSPENDED_OWNER_VACANT
+            raw["suspended_reason"] = vacancy.reason
+            suspended.append((AllowlistEntry.model_validate(raw), vacancy))
+        if not suspended:
+            return []
+        self._write_all(data)
+        for entry, vacancy in suspended:
+            await audit.record(AuditRecord(
+                finding_id="_governance", stage="governance",
+                payload={
+                    "decision": "allowlist_suspended", "action_class": entry.action_class,
+                    "trigger": SUSPENDED_OWNER_VACANT,
+                    "by": "system", "reason": vacancy.reason,
+                    "owner": entry.owner,
+                    "promoted_by": entry.promoted_by, "promoted_at": entry.promoted_at,
+                    "promotion_reason": entry.reason, "expires_at": entry.expires_at,
+                    "last_fired_at": entry.last_fired_at, "fire_count": entry.fire_count,
+                    "identity_verified": False, "auth_method": "system",
+                },
+            ))
+        return suspended
 
     def expiring_within(
         self, window: timedelta, *, now: Optional[datetime] = None,

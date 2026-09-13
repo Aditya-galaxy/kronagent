@@ -24,7 +24,7 @@ from .config import Settings
 from .approvals import ApprovalStore, now_iso
 from .outcomes import OutcomeStore
 from .shadow import build_report, calls_from_audit
-from .allowlist import AllowlistStore, DurationError, parse_duration
+from .allowlist import AllowlistStore, DurationError, OwnerNotInStandingError, parse_duration
 from .audit import AuditLog
 from .insights import insight_tags
 from .provenance import provenance_map, review_banner
@@ -33,6 +33,7 @@ from .identity import (
     DEFAULT_TENANT,
     AuthorizationError,
     Permission,
+    owner_vacancy_checker,
     resolve_actor,
 )
 from .policy import PolicyEngine
@@ -560,7 +561,9 @@ def list_allowlist(request: Request) -> list[str]:
     check_view_permission(request)
     tenant_id = tenant_scope(request)
     store = get_allowlist_store(tenant_id)
-    return [entry.action_class for entry in store.active()]
+    owner_check = owner_vacancy_checker(settings.operator_registry_path, tenant_id)
+    return [entry.action_class for entry in store.active()
+            if owner_check is None or owner_check(entry.owner) is None]
 
 
 @app.get("/api/allowlist/review")
@@ -583,6 +586,16 @@ def review_allowlist(request: Request) -> list[dict[str, Any]]:
     tenant_id = tenant_scope(request)
     store = get_allowlist_store(tenant_id)
     policy = PolicyEngine(settings, store)
+    owner_check = owner_vacancy_checker(settings.operator_registry_path, tenant_id)
+
+    def _owner_standing(owner: str) -> dict[str, Any]:
+        if owner_check is None:
+            # Unchecked is not the same as fine, and the console must not
+            # render it as a pass.
+            return {"owner_standing_checked": False, "owner_vacancy": None}
+        vacancy = owner_check(owner)
+        return {"owner_standing_checked": True,
+                "owner_vacancy": vacancy.reason if vacancy else None}
 
     def _classify(action_class: str) -> dict[str, Any]:
         try:
@@ -607,6 +620,7 @@ def review_allowlist(request: Request) -> list[dict[str, Any]]:
             "expired": entry.is_expired(),
             "stale": entry.is_stale(),
             "never_fired": entry.last_fired_at is None,
+            **_owner_standing(entry.owner),
             **_classify(entry.action_class),
         }
         for entry in store.list()
@@ -658,15 +672,22 @@ async def promote_allowlist_class(req: PromoteRequest, request: Request) -> dict
         except DurationError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
-    entry = await store.add(
-        ac,
-        by=actor.operator_id,
-        reason=req.reason,
-        audit=audit_log_resolved,
-        actor_fields=actor.audit_fields(),
-        expires_in=expires_in,
-        owner=req.owner,
-    )
+    try:
+        entry = await store.add(
+            ac,
+            by=actor.operator_id,
+            reason=req.reason,
+            audit=audit_log_resolved,
+            actor_fields=actor.audit_fields(),
+            expires_in=expires_in,
+            owner=req.owner,
+            owner_check=owner_vacancy_checker(settings.operator_registry_path, tenant_id),
+        )
+    except OwnerNotInStandingError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot promote {ac.value}: {exc}. Name an owner who can renew it.",
+        )
     detail = f"Class {ac.value} successfully promoted."
     if entry.expires_at:
         detail += f" Expires {entry.expires_at}; requires renewal after that."
@@ -713,14 +734,21 @@ async def reassign_allowlist_owner(req: ReassignRequest, request: Request) -> di
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid action class name '{req.action_class}'.")
 
-    entry = await store.set_owner(
-        ac,
-        owner=req.owner,
-        by=actor.operator_id,
-        reason=req.reason,
-        audit=audit_log_resolved,
-        actor_fields=actor.audit_fields(),
-    )
+    try:
+        entry = await store.set_owner(
+            ac,
+            owner=req.owner,
+            by=actor.operator_id,
+            reason=req.reason,
+            audit=audit_log_resolved,
+            actor_fields=actor.audit_fields(),
+            owner_check=owner_vacancy_checker(settings.operator_registry_path, tenant_id),
+        )
+    except OwnerNotInStandingError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot reassign {ac.value}: {exc}.",
+        )
     if entry is None:
         return {"status": "noop",
                 "detail": f"Class {ac.value} is not on the allowlist; nothing to reassign."}
