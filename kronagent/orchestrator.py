@@ -24,6 +24,7 @@ from .config import Settings
 from .containment import ContainmentExecutor
 from .correlation import CorrelationAgent, CorrelationAssessment, CorrelationMemory
 from .forensics import ForensicsAgent, ForensicsResult
+from .identity import owner_vacancy_checker
 from .ingestion import QueuedFinding
 from .intel import ThreatIntelAgent, ThreatIntelAssessment
 from .model import Finding
@@ -309,6 +310,17 @@ class Orchestrator:
                                    f"(promoted by {lapsed.promoted_by} at {lapsed.promoted_at}, "
                                    f"owner {lapsed.owner}) — "
                                    f"this class requires human approval again until renewed")
+        # Same shape for an owner who has left: the gate already refuses the
+        # entry, and this latches the suspension into the audit chain first.
+        if hasattr(tenant_allowlist, "suspend_vacant_owners"):
+            owner_check = owner_vacancy_checker(self._settings.operator_registry_path,
+                                                finding.tenant_id)
+            for entry, vacancy in await tenant_allowlist.suspend_vacant_owners(
+                    audit=tenant_audit, owner_check=owner_check):
+                _log("GOVERNANCE", f"{entry.action_class}: allowlist entry SUSPENDED — "
+                                   f"{vacancy.reason}; this class requires human approval "
+                                   f"until an operator renews it or reassigns it to an owner "
+                                   f"in standing")
 
         # 2 + 3. Policy decision and containment, per candidate action.
         guard = self._trajectory

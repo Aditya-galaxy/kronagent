@@ -167,4 +167,7 @@ def test_expired_allowlist_entry_routes_back_to_approval(tmp_path) -> None:
     _promote(_iso(days=-1))
     lapsed = engine.decide(action, severity=8.0)
     assert lapsed.disposition == "requires_approval"
-    assert "not yet in the earn-trust allowlist" in lapsed.reason
+    # Says the entry lapsed, not that the class was never promoted — the
+    # approver's next move is a renewal decision, not a first promotion.
+    assert "expired" in lapsed.reason
+    assert "not yet in the earn-trust allowlist" not in lapsed.reason

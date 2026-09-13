@@ -5,6 +5,7 @@ Unit and integration tests for the Kronagent Analyst Console Web Server.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import os
 import tempfile
 import pytest
@@ -41,7 +42,11 @@ def test_env():
                 "roles": ["viewer"],
                 "token_sha256": hash_token("password"),
                 "active": True
-            }
+            },
+            # Owners who never sign in during these tests but must exist:
+            # an allowlist entry can only be held by someone who could renew it.
+            "dana": {"display_name": "Dana Owner", "roles": ["admin"], "active": True},
+            "erin": {"display_name": "Erin Owner", "roles": ["admin"], "active": True},
         }
         with open(temp_registry_path, "w", encoding="utf-8") as f:
             json.dump(registry_data, f)
@@ -270,6 +275,54 @@ def test_reassign_allowlist_owner(test_env) -> None:
     assert entry.owner == "erin"
     assert entry.promoted_by == "alice"            # history untouched
     assert entry.reason == "30 days incident-free"
+
+
+def test_promote_refuses_an_owner_who_could_not_renew_the_entry(test_env) -> None:
+    """bob is a viewer and mallory is not in the registry. Neither could ever
+    say yes again, so neither can be made accountable for saying it."""
+    client, _, allowlist, _ = test_env
+    for owner in ("bob", "mallory"):
+        res = client.post(
+            "/api/allowlist/promote",
+            json={"action_class": "isolate_pod", "operator_id": "alice", "token": "secret",
+                  "reason": "r", "owner": owner},
+        )
+        assert res.status_code == 400, owner
+        assert owner in res.json()["detail"]
+    assert allowlist.list() == []
+
+
+def test_reassign_refuses_an_owner_not_in_standing(test_env) -> None:
+    client, _, allowlist, _ = test_env
+    client.post("/api/allowlist/promote",
+                json={"action_class": "isolate_pod", "operator_id": "alice", "token": "secret",
+                      "reason": "r", "owner": "dana"})
+    res = client.post(
+        "/api/allowlist/reassign",
+        json={"action_class": "isolate_pod", "operator_id": "alice", "token": "secret",
+              "reason": "r", "owner": "mallory"},
+    )
+    assert res.status_code == 400
+    assert allowlist.list()[0].owner == "dana"
+
+
+def test_allowlist_endpoints_report_a_departed_owner(test_env) -> None:
+    """The console must not list autonomy the gate already refuses, and the
+    review must say why rather than show the entry as healthy."""
+    client, _, allowlist, _ = test_env
+    client.post("/api/allowlist/promote",
+                json={"action_class": "isolate_pod", "operator_id": "alice", "token": "secret",
+                      "reason": "r", "owner": "dana"})
+    assert client.get("/api/allowlist").json() == ["isolate_pod"]
+    from kronagent import web
+    registry = json.loads(Path(web.settings.operator_registry_path).read_text())
+    registry["dana"]["active"] = False
+    Path(web.settings.operator_registry_path).write_text(json.dumps(registry))
+
+    assert client.get("/api/allowlist").json() == []
+    review = client.get("/api/allowlist/review").json()[0]
+    assert review["owner_standing_checked"] is True
+    assert "deactivated" in review["owner_vacancy"]
 
 
 def test_reassign_allowlist_owner_requires_promote_permission(test_env) -> None:

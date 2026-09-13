@@ -40,9 +40,9 @@ import hmac
 import json
 import os
 from enum import Enum
-from typing import Optional
+from typing import Callable, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Permission(str, Enum):
@@ -213,6 +213,93 @@ class LocalIdentityProvider:
 
 def registry_configured(registry_path: str) -> bool:
     return bool(registry_path) and os.path.exists(registry_path)
+
+
+# --------------------------------------------------------------------------- #
+# Owner standing — can this person still hold an allowlist entry?
+# --------------------------------------------------------------------------- #
+
+class OwnerVacancy(BaseModel):
+    """Why an allowlist entry's owner can no longer hold it.
+
+    `definitive` separates "the directory says this person is gone" from "the
+    directory could not be read". Both refuse autonomy at the gate — an owner
+    nobody can vouch for grants nothing — but only a definitive vacancy is
+    latched as a suspension. A corrupt registry file has not made anyone leave,
+    and latching on it would silently strand every entry on the allowlist.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    owner: str
+    reason: str
+    definitive: bool = True
+
+
+def owner_vacancy(registry_path: str, owner: str, tenant_id: str) -> Optional[OwnerVacancy]:
+    """None if `owner` may still hold an allowlist entry on `tenant_id`.
+
+    Holding an entry means being the person who is asked to renew it and who
+    can say yes, so the test is exactly what saying yes would need: an active
+    operator in the registry, carrying PROMOTE, with access to this tenant.
+    Anything less and the entry has nobody accountable for it — the orphan that
+    ownership exists to prevent, just arrived at by someone leaving instead of
+    by nobody being named.
+
+    Only callable with a local registry. An OIDC-only deployment has no
+    directory to ask about someone who is not currently signing in, so owner
+    standing is not evaluated there; see `owner_vacancy_checker`.
+    """
+    try:
+        with open(registry_path, "r", encoding="utf-8") as fh:
+            registry = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return OwnerVacancy(owner=owner, definitive=False,
+                            reason=f"operator registry unreadable ({type(exc).__name__}) — "
+                                   f"cannot confirm owner {owner!r}")
+    if not isinstance(registry, dict) or not registry:
+        return OwnerVacancy(owner=owner, definitive=False,
+                            reason=f"operator registry is empty or malformed — "
+                                   f"cannot confirm owner {owner!r}")
+
+    record = registry.get(owner)
+    if not isinstance(record, dict):
+        return OwnerVacancy(owner=owner, reason=f"owner {owner!r} is not in the operator registry")
+    operator = Operator(
+        operator_id=owner,
+        display_name=record.get("display_name", owner),
+        roles=list(record.get("roles", [])),
+        active=bool(record.get("active", True)),
+        tenants=list(record.get("tenants", [])),
+    )
+    if not operator.active:
+        return OwnerVacancy(owner=owner, reason=f"owner {owner!r} is deactivated")
+    if not operator.can(Permission.PROMOTE):
+        return OwnerVacancy(owner=owner,
+                            reason=f"owner {owner!r} no longer holds the promote permission "
+                                   f"(roles: {', '.join(operator.roles) or 'none'})")
+    tenants = operator.permitted_tenants()
+    if ALL_TENANTS not in tenants and (tenant_id or DEFAULT_TENANT) not in tenants:
+        return OwnerVacancy(owner=owner,
+                            reason=f"owner {owner!r} no longer has access to tenant "
+                                   f"{tenant_id or DEFAULT_TENANT!r}")
+    return None
+
+
+def owner_vacancy_checker(
+    registry_path: str, tenant_id: str,
+) -> Optional[Callable[[str], Optional[OwnerVacancy]]]:
+    """A per-tenant owner check, or None when there is no directory to check.
+
+    None is a statement, not a default: with no local registry there are no
+    verified identities at all (or only OIDC ones, which cannot be looked up
+    while their holder is offline), so there is nothing to say an owner has
+    left. Callers report that owner standing was not checked rather than
+    implying it passed.
+    """
+    if not registry_configured(registry_path):
+        return None
+    return lambda owner: owner_vacancy(registry_path, owner, tenant_id)
 
 
 # --------------------------------------------------------------------------- #

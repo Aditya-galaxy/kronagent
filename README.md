@@ -37,6 +37,16 @@ hard part. Kronagent's answer is **earn-trust, graduated autonomy**:
   `promote.py warn-expiring` (cron) tells each owner once, ahead of time, that
   theirs is about to lapse. Neither can keep an entry alive; if the warning
   never arrives, the entry still expires on schedule.
+- **An owner who leaves takes the autonomy with them.** With an operator
+  registry configured, an entry stops granting autonomy the moment its owner
+  is removed, deactivated, loses the promote permission, or loses access to
+  the tenant — judged on every decision, in the tenant the action runs in.
+  The pipeline then records a suspension in the audit chain. Adding the person
+  back to the registry does not undo it; only a renewal, or a reassignment to
+  someone in standing, does. And no one can be made an owner who couldn't
+  renew the entry. Without a registry (or with OIDC alone, which has no
+  directory to ask), owner standing is not checked, and `run_preflight.py`
+  says so rather than passing it.
 - **The policy engine is the hard ceiling, not a suggestion.** Actions are
   classified by reversibility and blast radius. Destructive or wide-blast
   actions (terminate an instance, delete a pod, scale a deployment to zero)

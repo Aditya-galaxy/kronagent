@@ -42,6 +42,7 @@ from typing import Optional
 
 from .allowlist import AllowlistStore
 from .config import Settings
+from .identity import owner_vacancy_checker
 from .schemas import ActionClass, BlastRadius, PolicyDecision, ProposedAction
 
 # Intrinsic properties of each containment capability. This table is the
@@ -264,7 +265,13 @@ class PolicyEngine:
 
         actual_allowlist = allowlist if allowlist is not None else self._allowlist
         auto_eligible = self.is_auto_eligible(action.action_class)
-        allowlisted = actual_allowlist.is_allowed(action.action_class)
+        # Owner standing is checked against the tenant the action runs in —
+        # stamped from the finding, never by a planner or model — because an
+        # owner can keep their job and still lose access to this customer.
+        owner_check = owner_vacancy_checker(s.operator_registry_path, action.tenant_id)
+        allowlisted, entry_refusal = actual_allowlist.evaluate(
+            action.action_class, owner_check=owner_check,
+        )
 
         if auto_eligible and allowlisted:
             return PolicyDecision(
@@ -277,6 +284,11 @@ class PolicyEngine:
 
         if not auto_eligible:
             reason = "destructive or wide blast radius — human approval required"
+        elif entry_refusal:
+            # Say why an entry that exists does not count. "Not allowlisted"
+            # would send the approver to promote a class that is already
+            # promoted, and hide that its owner has gone.
+            reason = f"auto-eligible, but {entry_refusal} — human approval required"
         else:
             reason = "auto-eligible but not yet in the earn-trust allowlist — human approval required"
 
