@@ -621,6 +621,7 @@ def review_allowlist(request: Request) -> list[dict[str, Any]]:
             "stale": entry.is_stale(),
             "never_fired": entry.last_fired_at is None,
             **_owner_standing(entry.owner),
+            "classification_drift": entry.classification_drift(),
             **_classify(entry.action_class),
         }
         for entry in store.list()

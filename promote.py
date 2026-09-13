@@ -176,6 +176,9 @@ def _standing_flags(e: AllowlistEntry, owner_check, now: datetime) -> list[str]:
         return []
     if e.is_suspended:
         return [f"SUSPENDED — {e.suspended_reason}"]
+    drift = e.classification_drift()
+    if drift is not None:
+        return [f"RECLASSIFIED — {drift}"]
     vacancy = owner_check(e.owner) if owner_check else None
     if vacancy is not None:
         return [f"OWNER NOT IN STANDING — {vacancy.reason}"]
@@ -263,8 +266,13 @@ def cmd_review(store: AllowlistStore, audit: AuditLog, settings: Settings,
         if not e.is_expired(now):
             if e.is_suspended:
                 reasons.append("suspended")
+            elif e.classification_drift() is not None:
+                reasons.append("reclassified")
             elif owner_check is not None and owner_check(e.owner) is not None:
                 reasons.append("owner not in standing")
+        if e.classification is None and _is_auto_eligible(policy, e.action_class) is not None:
+            # Predates pinning: a reclassification would go unnoticed for it.
+            reasons.append("classification not pinned — renew to pin it")
         if e.is_expired(now):
             reasons.append("expired")
         else:
@@ -552,6 +560,10 @@ def main() -> int:
     for lapsed in asyncio.run(store.expire_due(audit=audit)):
         print(f"EXPIRED: {lapsed.action_class} — TTL elapsed at {lapsed.expires_at}; it requires "
               f"human approval again until renewed (recorded in the audit log).", file=sys.stderr)
+    for entry, drift in asyncio.run(store.suspend_reclassified(audit=audit)):
+        print(f"SUSPENDED: {entry.action_class} — {drift}; it requires human approval until "
+              f"renewed against its current classification (recorded in the audit log).",
+              file=sys.stderr)
     for entry, vacancy in asyncio.run(store.suspend_vacant_owners(
             audit=audit, owner_check=_owner_check(settings))):
         print(f"SUSPENDED: {entry.action_class} — {vacancy.reason}; it requires human approval "

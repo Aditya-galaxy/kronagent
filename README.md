@@ -47,6 +47,13 @@ hard part. Kronagent's answer is **earn-trust, graduated autonomy**:
   renew the entry. Without a registry (or with OIDC alone, which has no
   directory to ask), owner standing is not checked, and `run_preflight.py`
   says so rather than passing it.
+- **A promotion covers the action as it was classified.** Each entry pins the
+  policy table's classification (reversible, blast radius, destructive) on the
+  day it was promoted. If the table later changes that class in either
+  direction, the entry stops granting autonomy and is suspended, and only a
+  renewal lifts it. Otherwise a class promoted while classified destructive
+  (recorded but inert behind the ceiling) would go live unattended the day the
+  table relaxed it.
 - **The policy engine is the hard ceiling, not a suggestion.** Actions are
   classified by reversibility and blast radius. Destructive or wide-blast
   actions (terminate an instance, delete a pod, scale a deployment to zero)

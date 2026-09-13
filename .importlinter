@@ -59,6 +59,7 @@ source_modules =
     kronagent.policy
     kronagent.allowlist
     kronagent.trajectory
+    kronagent.classification
 forbidden_modules =
     kronagent.llm
     kronagent.triage

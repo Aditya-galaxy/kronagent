@@ -310,6 +310,12 @@ class Orchestrator:
                                    f"(promoted by {lapsed.promoted_by} at {lapsed.promoted_at}, "
                                    f"owner {lapsed.owner}) — "
                                    f"this class requires human approval again until renewed")
+        # And for an action the policy table has reclassified since promotion.
+        if hasattr(tenant_allowlist, "suspend_reclassified"):
+            for entry, drift in await tenant_allowlist.suspend_reclassified(audit=tenant_audit):
+                _log("GOVERNANCE", f"{entry.action_class}: allowlist entry SUSPENDED — {drift}; "
+                                   f"this class requires human approval until an operator "
+                                   f"renews it against its current classification")
         # Same shape for an owner who has left: the gate already refuses the
         # entry, and this latches the suspension into the audit chain first.
         if hasattr(tenant_allowlist, "suspend_vacant_owners"):
