@@ -159,6 +159,23 @@ hard part. Kronagent's answer is **earn-trust, graduated autonomy**:
   What this still does not show: one model, 60 trials (the true rate could be
   as high as about 6%), a corpus of 41 synthetic cases, and a recheck that has
   never had to fire against a live model because the prompt held every trial.
+- **Campaign memory holds facts, shows its working, and can't be flushed.**
+  The correlation agent remembers findings, never conclusions about them, so a
+  wrong correlation can mislead whoever reads that record and cannot colour the
+  next finding. Three rules govern what it is shown. Earlier findings that
+  share an indicator with the current one (the same remote address, a resource
+  in common) come first, so an attacker can't push a real finding out of view
+  with noise, which a last-25 window allowed. Findings older than 30 days are
+  not history. And a finding the team judged benign is withdrawn: it is not
+  offered again, and `outcome.py stale-correlations` lists every recorded
+  correlation that leaned on it. Each assessment records which findings the
+  model was shown and, for each link it claimed, what Kronagent itself could
+  verify: the shared indicators, computed by code, or "model inference only".
+  The approver sees that next to the model's summary. The model cites findings
+  by an opaque reference and reads the current finding's title inside the same
+  fence triage uses. What this doesn't do: an operator can't yet reject a
+  single link directly, and the indicators are exact matches only (the same
+  address, not the same network).
 - **Nothing is invisible.** Every decision — triage, policy, containment,
   approval, governance, forensics — is one entry in an append-only,
   SHA-256-chained audit log. Editing a past record breaks verification of

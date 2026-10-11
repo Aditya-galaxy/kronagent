@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from kronagent.allowlist import AllowlistStore, parse_duration
 from kronagent.audit import AuditLog
 from kronagent.config import Settings
+from kronagent.correlation import stale_correlations
 from kronagent.evidence import unwarranted_autonomy
 from kronagent.identity import AuthContext, AuthorizationError, Permission, resolve_actor
 from kronagent.orchestrator import get_tenant_path
@@ -97,6 +98,14 @@ def cmd_record(settings: Settings, audit: AuditLog, store: OutcomeStore,
               if previous else "")
     print(f"Recorded {stored.verdict}/{stored.team_action} for {stored.finding_id} "
           f"by {stored.recorded_by}{change}.")
+    if stored.verdict == "benign":
+        # A benign finding is withdrawn from correlation history. Say which
+        # recorded correlations leaned on it, so nobody keeps reading them as
+        # a campaign.
+        for item in stale_correlations(audit.records(), [stored.finding_id]):
+            left = (f"; still linked to {', '.join(item['still_standing'])}" if item["still_standing"]
+                    else "; no link is left")
+            print(f"STALE: the correlation recorded for {item['finding_id']} cited {stored.finding_id}{left}.")
     for entry, reason in suspend_unwarranted_autonomy(settings, audit, store, args.tenant):
         print(f"SUSPENDED: {entry.action_class} — it {reason}. It requires human approval again "
               f"until {entry.owner} or another operator renews it (recorded in the audit log).")
@@ -143,6 +152,23 @@ def cmd_pending(settings: Settings, audit: AuditLog, store: OutcomeStore, args: 
     return 3 if any(u.overdue for u in pending) else 0
 
 
+def cmd_stale(audit: AuditLog, store: OutcomeStore, args: argparse.Namespace) -> int:
+    """Recorded correlations that cite a finding the team has since judged benign."""
+    withdrawn = [o.finding_id for o in store.list() if o.verdict == "benign"]
+    stale = stale_correlations(audit.records(), withdrawn)
+    if args.json:
+        print(json.dumps(stale, indent=2))
+        return 0
+    if not stale:
+        print("No recorded correlation cites a finding judged benign.")
+    for item in stale:
+        left = (f"still linked to {', '.join(item['still_standing'])}" if item["still_standing"]
+                else "no link is left")
+        print(f"{item['finding_id']}  cited {', '.join(item['withdrawn'])} (judged benign); {left}"
+              + (f"  — {item['summary']}" if item["summary"] else ""))
+    return 0
+
+
 def cmd_report(audit: AuditLog, store: OutcomeStore, args: argparse.Namespace) -> int:
     report = build_report(calls_from_audit(audit.records()), store.list())
     print(json.dumps(report.model_dump(), indent=2) if args.json else render_text(report))
@@ -176,6 +202,9 @@ def main(argv: list[str] | None = None) -> int:
                       help="also list actions that would have run in dry-run: the findings a "
                            "shadow-mode team labels to build promotion evidence")
     pend.add_argument("--json", action="store_true")
+    st = sub.add_parser("stale-correlations",
+                        help="recorded correlations that cite a finding since judged benign")
+    st.add_argument("--json", action="store_true")
     rep = sub.add_parser("report", help="score Kronagent's decisions against the team's")
     rep.add_argument("--json", action="store_true")
 
@@ -187,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_record(settings, audit, store, args)
     if args.command == "list":
         return cmd_list(store)
+    if args.command == "stale-correlations":
+        return cmd_stale(audit, store, args)
     if args.command == "pending":
         return cmd_pending(settings, audit, store, args)
     return cmd_report(audit, store, args)
