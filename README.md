@@ -49,6 +49,16 @@ hard part. Kronagent's answer is **earn-trust, graduated autonomy**:
   from before the promotion, or before its last renewal, can't undo a decision
   made knowing the record. And revising the outcome afterwards doesn't hand
   the autonomy back: whether to trust the class again is a person's question.
+- **An autonomous action nobody has reviewed is loud, and stays contained.**
+  When a promoted class acts with nobody asked, someone finds out afterwards,
+  if at all. `outcome.py pending` lists every such action that has no recorded
+  outcome, oldest first, and exits non-zero once any has waited longer than
+  `KRONAGENT_CONFIRM_WITHIN` (24h by default), so a scheduled run can page
+  someone. The weekly digest leads with them, from any week, not only the
+  last. What it never does is release anything. "Contain, then release after N
+  minutes unless someone confirms" would hand a real attacker their access
+  back whenever nobody was watching: a review that fails open. Silence here
+  costs noise, never containment.
 - **Trust is re-earned, not inherited.** A promotion can carry a TTL
   (`--expires-in 90d`) and names an **owner** — the person accountable for it
   now, asked to renew it, and reassignable as people change teams (distinct

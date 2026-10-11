@@ -102,6 +102,10 @@ class Settings:
     # doesn't bound its error below this, unless the operator overrides it with
     # a reason, which is audited. See kronagent/evidence.py.
     promotion_max_error: float | None = None
+    # How long an autonomous action may go without a recorded outcome before it
+    # is reported as overdue (outcome.py pending, the weekly digest). A
+    # duration like "24h" or "2d". Nothing is released when it lapses.
+    confirm_within: str = "24h"
 
     # --- AWS ---
     aws_region: str = "us-east-1"
@@ -248,6 +252,7 @@ class Settings:
             triage_override_floor=float(
                 os.getenv("KRONAGENT_TRIAGE_OVERRIDE_FLOOR", "7.0")
             ),
+            confirm_within=os.getenv("KRONAGENT_CONFIRM_WITHIN", "24h"),
             promotion_max_error=(float(os.environ["KRONAGENT_PROMOTION_MAX_ERROR"])
                                  if os.getenv("KRONAGENT_PROMOTION_MAX_ERROR") else None),
             aws_region=os.getenv("AWS_REGION", "us-east-1"),
@@ -329,6 +334,11 @@ class Settings:
                 f"KRONAGENT_MIN_SEVERITY ({self.min_severity_for_containment}), so it has "
                 f"no effect: findings under the containment threshold are alert-only "
                 f"either way. Set it at or above the containment threshold.")
+        try:
+            from .allowlist import parse_duration
+            parse_duration(self.confirm_within)
+        except ValueError as exc:
+            errors.append(f"KRONAGENT_CONFIRM_WITHIN ({self.confirm_within}) is not a duration: {exc}")
         if self.promotion_max_error is not None and not 0.0 < self.promotion_max_error < 1.0:
             errors.append(
                 f"KRONAGENT_PROMOTION_MAX_ERROR ({self.promotion_max_error}) must be a share "

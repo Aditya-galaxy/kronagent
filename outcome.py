@@ -27,8 +27,9 @@ import asyncio
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
-from kronagent.allowlist import AllowlistStore
+from kronagent.allowlist import AllowlistStore, parse_duration
 from kronagent.audit import AuditLog
 from kronagent.config import Settings
 from kronagent.evidence import unwarranted_autonomy
@@ -37,6 +38,7 @@ from kronagent.orchestrator import get_tenant_path
 from kronagent.outcomes import AnalystOutcome, OutcomeStore
 from kronagent.schemas import AuditRecord
 from kronagent.shadow import build_report, calls_from_audit, render_text
+from kronagent.unconfirmed import render_text as render_pending, unconfirmed_actions
 
 
 def _resolve(settings: Settings, audit: AuditLog, args: argparse.Namespace) -> AuthContext:
@@ -122,6 +124,25 @@ def cmd_list(store: OutcomeStore) -> int:
     return 0
 
 
+def cmd_pending(settings: Settings, audit: AuditLog, store: OutcomeStore, args: argparse.Namespace) -> int:
+    """Autonomous actions nobody has recorded an outcome for. Exit 3 when any
+    is overdue, so a scheduled run can page someone."""
+    window = args.older_than or settings.confirm_within
+    try:
+        within = parse_duration(window)
+    except ValueError as exc:
+        print(f"--older-than: {exc}", file=sys.stderr)
+        return 2
+    pending = unconfirmed_actions(calls_from_audit(audit.records()), store.list(),
+                                  now=datetime.now(timezone.utc), confirm_within=within,
+                                  include_dry_run=args.include_dry_run)
+    if args.overdue_only:
+        pending = [u for u in pending if u.overdue]
+    print(json.dumps([u.model_dump() for u in pending], indent=2) if args.json
+          else render_pending(pending, window))
+    return 3 if any(u.overdue for u in pending) else 0
+
+
 def cmd_report(audit: AuditLog, store: OutcomeStore, args: argparse.Namespace) -> int:
     report = build_report(calls_from_audit(audit.records()), store.list())
     print(json.dumps(report.model_dump(), indent=2) if args.json else render_text(report))
@@ -146,6 +167,15 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--token", help="operator token (or KRONAGENT_OPERATOR_TOKEN)")
 
     sub.add_parser("list", help="list recorded outcomes")
+    pend = sub.add_parser("pending", help="autonomous actions with no recorded outcome; exit 3 if any "
+                                          "is overdue. Nothing is ever released for lack of one.")
+    pend.add_argument("--older-than", metavar="DURATION",
+                      help="what counts as overdue, e.g. 4h (default: KRONAGENT_CONFIRM_WITHIN, 24h)")
+    pend.add_argument("--overdue-only", action="store_true")
+    pend.add_argument("--include-dry-run", action="store_true",
+                      help="also list actions that would have run in dry-run: the findings a "
+                           "shadow-mode team labels to build promotion evidence")
+    pend.add_argument("--json", action="store_true")
     rep = sub.add_parser("report", help="score Kronagent's decisions against the team's")
     rep.add_argument("--json", action="store_true")
 
@@ -157,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_record(settings, audit, store, args)
     if args.command == "list":
         return cmd_list(store)
+    if args.command == "pending":
+        return cmd_pending(settings, audit, store, args)
     return cmd_report(audit, store, args)
 
 
