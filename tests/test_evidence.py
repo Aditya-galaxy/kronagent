@@ -217,3 +217,112 @@ def test_review_shows_the_evidence_then_and_now_and_flags_a_record_that_fell_bel
     assert "at promotion: 0 unwarranted of 59 scored, error below 5.0%" in review.stdout
     assert "today: 2 unwarranted of 61 scored" in review.stdout and "NOT MET" in review.stdout
     assert "evidence below the bar" in review.stdout
+
+
+# --- evidence that takes autonomy away ---------------------------------------
+
+from kronagent.allowlist import SUSPENDED_UNWARRANTED, AllowlistStore  # noqa: E402
+from kronagent.evidence import unwarranted_autonomy  # noqa: E402
+from kronagent.schemas import ActionClass  # noqa: E402
+
+LATER = "2099-01-01T00:00:00+00:00"       # after any promotion made during a test
+EARLIER = "2020-01-01T00:00:00+00:00"
+
+
+def _promoted(tmp_path: Path, action: ActionClass = ActionClass.DISABLE_ACCESS_KEY, **kw) -> AllowlistStore:
+    store = AllowlistStore(str(tmp_path / "allowlist.json"))
+    asyncio.run(store.add(action, by="ana", reason="earned", audit=AuditLog(str(tmp_path / "audit.jsonl")), **kw))
+    return store
+
+
+def _offences(store: AllowlistStore, records: list[dict], outcomes: list[AnalystOutcome]) -> dict:
+    return unwarranted_autonomy(calls_from_audit(records), outcomes, store.list())
+
+
+def test_an_unattended_action_the_team_judged_unwarranted_is_an_offence(tmp_path: Path) -> None:
+    store = _promoted(tmp_path)
+    records = _finding("bad", action="disable_access_key", disposition="auto_execute", ts=LATER)
+    assert _offences(store, records, [_outcome("bad", "benign", "no_action")]) == {"disable_access_key": ["bad"]}
+    assert _offences(store, records, [_outcome("bad", "malicious", "no_action")]) == {"disable_access_key": ["bad"]}
+
+
+def test_what_is_not_an_offence(tmp_path: Path) -> None:
+    store = _promoted(tmp_path)
+    unwarranted = [_outcome(f, "benign", "no_action") for f in ("approved", "old", "other", "unsure", "good")]
+    unwarranted[3] = _outcome("unsure", "inconclusive", "no_action")
+    unwarranted[4] = _outcome("good")
+    records = (
+        _finding("approved", action="disable_access_key", disposition="requires_approval", ts=LATER)   # a person's call
+        + _finding("old", action="disable_access_key", disposition="auto_execute", ts=EARLIER)       # before the promotion
+        + _finding("other", action="isolate_pod", provider="kubernetes", disposition="auto_execute", ts=LATER)
+        + _finding("unsure", action="disable_access_key", disposition="auto_execute", ts=LATER)
+        + _finding("good", action="disable_access_key", disposition="auto_execute", ts=LATER)
+        + _finding("unlabeled", action="disable_access_key", disposition="auto_execute", ts=LATER))
+    assert _offences(store, records, unwarranted) == {}
+
+
+def test_an_offence_on_a_provider_the_promotion_does_not_cover_is_not_its_offence(tmp_path: Path) -> None:
+    store = _promoted(tmp_path, ActionClass.BLOCK_IP, providers=["aws"])
+    records = _finding("cf", action="block_ip", provider="cloudflare", disposition="auto_execute", ts=LATER)
+    assert _offences(store, records, [_outcome("cf", "benign", "no_action")]) == {}
+    records = _finding("aws", action="block_ip", provider="aws", disposition="auto_execute", ts=LATER)
+    assert _offences(store, records, [_outcome("aws", "benign", "no_action")]) == {"block_ip": ["aws"]}
+
+
+def test_the_suspension_latches_is_audited_and_the_gate_refuses(tmp_path: Path) -> None:
+    store, audit = _promoted(tmp_path), AuditLog(str(tmp_path / "audit.jsonl"))
+    assert store.is_allowed(ActionClass.DISABLE_ACCESS_KEY, provider="aws")
+    (entry, reason), = asyncio.run(store.suspend_unwarranted({"disable_access_key": ["bad-1", "bad-2"]}, audit=audit))
+    assert entry.suspended_trigger == SUSPENDED_UNWARRANTED and "bad-1, bad-2" in reason
+    assert not store.is_allowed(ActionClass.DISABLE_ACCESS_KEY, provider="aws")
+    assert asyncio.run(store.suspend_unwarranted({"disable_access_key": ["bad-1"]}, audit=audit)) == []   # idempotent
+    record = [r["payload"] for r in audit.records() if r["payload"].get("decision") == "allowlist_suspended"][-1]
+    assert record["trigger"] == SUSPENDED_UNWARRANTED and record["findings"] == ["bad-1", "bad-2"]
+    assert AuditLog.verify(str(tmp_path / "audit.jsonl")) == (True, None)
+
+
+def _outcome_cli(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "outcome.py", *args], cwd=REPO, capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "KRONAGENT_AUDIT_PATH": str(tmp_path / "audit.jsonl"),
+             "KRONAGENT_OUTCOME_PATH": str(tmp_path / "outcomes.json"),
+             "KRONAGENT_ALLOWLIST_PATH": str(tmp_path / "allowlist.json"),
+             "KRONAGENT_CONNECTION_PATH": str(tmp_path / "connections.json"),
+             "KRONAGENT_AUTO_EXECUTE_ALLOWLIST": ""})
+
+
+def _acted_unattended(tmp_path: Path, fid: str) -> None:
+    log = AuditLog(str(tmp_path / "audit.jsonl"))
+    for rec in _finding(fid, action="disable_access_key", disposition="auto_execute"):
+        asyncio.run(log.record(AuditRecord(finding_id=rec["finding_id"], stage=rec["stage"], payload=rec["payload"])))
+
+
+def test_recording_an_unwarranted_outcome_suspends_the_class_until_it_is_renewed(tmp_path: Path) -> None:
+    assert _promote(tmp_path, "add", "disable_access_key", "--by", "ana", "--reason", "earned").returncode == 0
+    _acted_unattended(tmp_path, "f-wrong")
+
+    recorded = _outcome_cli(tmp_path, "record", "f-wrong", "--verdict", "benign", "--action", "no_action", "--by", "ben")
+    assert recorded.returncode == 0, recorded.stderr
+    assert "SUSPENDED: disable_access_key" in recorded.stdout and "f-wrong" in recorded.stdout
+    entry = json.loads((tmp_path / "allowlist.json").read_text())["disable_access_key"]
+    assert entry["suspended_trigger"] == "unwarranted_outcome"
+
+    # Changing the outcome afterwards does not hand the autonomy back.
+    _outcome_cli(tmp_path, "record", "f-wrong", "--verdict", "malicious", "--action", "contained", "--by", "ben")
+    assert json.loads((tmp_path / "allowlist.json").read_text())["disable_access_key"]["suspended_at"]
+
+    # A renewal does, and the finding that caused the suspension can't cause another.
+    assert _promote(tmp_path, "add", "disable_access_key", "--by", "ana", "--reason", "reviewed f-wrong").returncode == 0
+    _outcome_cli(tmp_path, "record", "f-wrong", "--verdict", "benign", "--action", "no_action", "--by", "ben")
+    listed = _promote(tmp_path, "list")
+    entry = json.loads((tmp_path / "allowlist.json").read_text())["disable_access_key"]
+    assert entry["suspended_at"] is None, listed.stdout + listed.stderr
+
+
+def test_an_outcome_on_a_finding_a_person_approved_suspends_nothing(tmp_path: Path) -> None:
+    assert _promote(tmp_path, "add", "disable_access_key", "--by", "ana", "--reason", "earned").returncode == 0
+    log = AuditLog(str(tmp_path / "audit.jsonl"))
+    for rec in _finding("f-approved", action="disable_access_key", disposition="requires_approval"):
+        asyncio.run(log.record(AuditRecord(finding_id=rec["finding_id"], stage=rec["stage"], payload=rec["payload"])))
+    out = _outcome_cli(tmp_path, "record", "f-approved", "--verdict", "benign", "--action", "no_action", "--by", "ben")
+    assert out.returncode == 0 and "SUSPENDED" not in out.stdout
