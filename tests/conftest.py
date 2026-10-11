@@ -34,6 +34,9 @@ def settings(tmp_path) -> Settings:
         # Never the repo-root runtime file: tests must not depend on whichever
         # account a developer last connected.
         connection_store_path=str(tmp_path / "connections.json"),
+        # The pipeline reads recorded outcomes (benign findings are withdrawn
+        # from correlation history), so this must not be the repo-root file either.
+        outcome_store_path=str(tmp_path / "outcomes.json"),
     )
 
 

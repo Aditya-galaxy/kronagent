@@ -462,6 +462,35 @@ async def test_correlation_memory_accumulates_across_findings(settings) -> None:
     assert correlation.seen_prior["f-2"] == ["f-1"]
 
 
+async def test_a_finding_judged_benign_is_withdrawn_from_later_history(settings) -> None:
+    """The team recorded f-1 as benign. f-3 arrives afterwards and must be
+    correlated against f-2 only: a false positive is not the first stage of
+    anything."""
+    from kronagent.outcomes import AnalystOutcome, OutcomeStore
+
+    correlation = FakeCorrelation()
+
+    class Quiet:
+        async def assess(self, finding):
+            return _verdict(finding.finding_id, actionable=False, severity=3.0), []
+
+    orch, _ = _orchestrator(settings, Quiet(), FakePolicyEngine("requires_approval"), correlation=correlation)
+    first, _ = _queued(_finding(finding_id="f-1", severity=3.0))
+    second, _ = _queued(_finding(finding_id="f-2", severity=3.0))
+    await _drain(orch, [first, second])
+    OutcomeStore(settings.outcome_store_path).record(AnalystOutcome(
+        finding_id="f-1", verdict="benign", team_action="no_action", recorded_by="ana"))
+
+    class Loud(Quiet):
+        async def assess(self, finding):
+            return _verdict(finding.finding_id, actionable=True), [_action("kubernetes", ActionClass.ISOLATE_POD, "p")]
+
+    orch._triage = Loud()
+    third, _ = _queued(_finding(finding_id="f-3"))
+    await _drain(orch, [third])
+    assert correlation.seen_prior["f-3"] == ["f-2"]
+
+
 async def test_correlation_threads_into_approval_context(settings) -> None:
     correlation = FakeCorrelation()
     candidate = _action("kubernetes", ActionClass.ISOLATE_POD, "pod-1")

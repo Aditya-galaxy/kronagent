@@ -24,6 +24,7 @@ from .config import Settings
 from .connect import tenant_environment
 from .containment import ContainmentExecutor
 from .correlation import CorrelationAgent, CorrelationAssessment, CorrelationMemory
+from .outcomes import OutcomeStore
 from .forensics import ForensicsAgent, ForensicsResult
 from .identity import owner_vacancy_checker
 from .ingestion import QueuedFinding
@@ -97,6 +98,16 @@ class Orchestrator:
     def processed(self) -> int:
         return self._processed
 
+    def _withdrawn(self, tenant_id: str) -> set[str]:
+        """Findings this tenant's team recorded as benign: not history to
+        correlate against. Correlation is advisory, so an unreadable outcome
+        store costs this filter, not the finding."""
+        path = get_tenant_path(self._settings.outcome_store_path, tenant_id)
+        try:
+            return {o.finding_id for o in OutcomeStore(path).list() if o.verdict == "benign"}
+        except (ValueError, OSError):
+            return set()
+
     async def _handle(self, finding: Finding) -> None:
         _log("INCIDENT", f"--- [{finding.provider}] {finding.finding_id} | "
                          f"{finding.finding_type} | severity={finding.severity} | tenant={finding.tenant_id} ---")
@@ -132,7 +143,9 @@ class Orchestrator:
         # Record into campaign memory BEFORE triage's early-returns
         prior = []
         if tenant_memory is not None:
-            prior = tenant_memory.prior_to(finding.finding_id)
+            # History is chosen by rule: findings sharing an indicator first,
+            # within the age limit, and never one the team has judged benign.
+            prior = tenant_memory.relevant_to(finding, withdrawn=self._withdrawn(finding.tenant_id))
             # Store the ORIGINAL finding, not a masked or sanitized copy.
             # Campaign memory is internal state that never reaches a model
             # directly — the correlation agent masks it at prompt-build time,
@@ -468,7 +481,7 @@ class Orchestrator:
                     mitre_techniques=intel.technique_ids(),
                     threat_intel_summary=intel.intel_summary,
                     related_finding_ids=correlation.related_finding_ids,
-                    correlation_summary=correlation.correlation_summary,
+                    correlation_summary=correlation.summary_with_basis(),
                     incident_priority=command.priority,
                     escalated=command.escalate_to_human_now,
                     incident_narrative=command.incident_narrative,

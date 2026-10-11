@@ -54,12 +54,22 @@ def test_memory_prior_to_excludes_self() -> None:
 
 
 def test_memory_is_bounded_and_evicts_oldest() -> None:
-    mem = CorrelationMemory(maxlen=3)
+    mem = CorrelationMemory(maxlen=3, capacity=3)
     for i in range(5):
         mem.add(_finding(f"f-{i}"))
     ids = [s.finding_id for s in mem.prior_to("none")]
     assert ids == ["f-2", "f-3", "f-4"]  # oldest two evicted
     assert len(mem) == 3
+
+
+def test_what_is_shown_is_smaller_than_what_is_kept() -> None:
+    """`maxlen` bounds one assessment's history, not the memory. When they were
+    the same number, 25 noisy findings were enough to flush a real one."""
+    mem = CorrelationMemory(maxlen=3)
+    for i in range(5):
+        mem.add(_finding(f"f-{i}"))
+    assert [s.finding_id for s in mem.prior_to("none")] == ["f-2", "f-3", "f-4"]
+    assert len(mem) == 5
 
 
 # --------------------------------------------------------------------------- #

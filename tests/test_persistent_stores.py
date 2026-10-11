@@ -15,7 +15,7 @@ def test_correlation_memory_sqlite(tmp_path) -> None:
     db_path = str(tmp_path / "campaign_memory.db")
     
     # 1. Initialize and verify table creation
-    mem = CorrelationMemory(db_path=db_path, maxlen=3)
+    mem = CorrelationMemory(db_path=db_path, maxlen=3, capacity=3)
     assert len(mem) == 0
 
     # 2. Add findings and verify counts
@@ -34,10 +34,10 @@ def test_correlation_memory_sqlite(tmp_path) -> None:
     assert prior[0].finding_id == "f1"
     assert prior[1].finding_id == "f2"
 
-    # 4. Verify rolling window deletion (maxlen=3)
+    # 4. Verify the store's own bound (capacity=3)
     f4 = Finding(finding_id="f4", provider="aws", finding_type="rce", severity=9.0, title="RCE", resources=[])
     mem.add(f4)
-    assert len(mem) == 3 # stayed at maxlen
+    assert len(mem) == 3 # stayed at capacity
 
     # Verify f1 was deleted (oldest)
     prior_f4 = mem.prior_to("f4")
@@ -47,7 +47,7 @@ def test_correlation_memory_sqlite(tmp_path) -> None:
 
 def test_correlation_memory_in_memory_fallback() -> None:
     # Verify fallback to standard deque when no db_path is specified
-    mem = CorrelationMemory(db_path="", maxlen=2)
+    mem = CorrelationMemory(db_path="", maxlen=2, capacity=2)
     assert len(mem) == 0
 
     f1 = Finding(finding_id="f1", provider="aws", finding_type="exfil", severity=5.0, title="Exfil", resources=[])
