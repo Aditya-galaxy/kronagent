@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
         ApprovalStore(get_tenant_path(settings.approval_store_path, args.tenant)).list(),
         OutcomeStore(get_tenant_path(settings.outcome_store_path, args.tenant)).list(),
         now=datetime.now(timezone.utc), days=args.days, dry_run=settings.dry_run,
-        chain=AuditLog.verify(audit_path),
+        chain=AuditLog.verify(audit_path), confirm_within=settings.confirm_within,
     )
     text = json.dumps(digest.model_dump(), indent=2) if args.json else render_markdown(digest)
 

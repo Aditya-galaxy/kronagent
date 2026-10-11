@@ -38,9 +38,11 @@ from typing import Any, Iterable, Optional
 from pydantic import BaseModel, Field
 
 from .model import severity_band
+from .allowlist import parse_duration
 from .outcomes import AnalystOutcome
 from .oversight import compute_metrics
 from .shadow import ShadowReport, build_report, calls_from_audit, render_text
+from .unconfirmed import DEFAULT_CONFIRM_WITHIN, UnconfirmedAction, unconfirmed_actions
 
 #: Audit stages that mean a safety mechanism fired or something went wrong.
 SAFETY_STAGES = ("trajectory_halt", "trajectory_scope_violation", "security_alert",
@@ -89,6 +91,10 @@ class Digest(BaseModel):
     safety_events: dict[str, int] = Field(default_factory=dict)
 
     shadow: ShadowReport = Field(default_factory=ShadowReport)
+    # Autonomous actions that really ran and still have no recorded outcome.
+    # All-time, not windowed: the one from three weeks ago is the worst one.
+    unconfirmed: list[UnconfirmedAction] = Field(default_factory=list)
+    confirm_within: str = DEFAULT_CONFIRM_WITHIN
     alerts: list[str] = Field(default_factory=list)
 
 
@@ -102,12 +108,15 @@ def build_digest(
     days: int = 7,
     dry_run: bool = True,
     chain: tuple[bool, Optional[int]] = (True, None),
+    confirm_within: str = DEFAULT_CONFIRM_WITHIN,
 ) -> Digest:
     if days <= 0:
         raise ValueError(f"days must be positive, got {days}")
     end = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
     start = end - timedelta(days=days)
 
+    records = list(records)
+    outcomes = list(outcomes)
     unreadable = 0
     windowed: list[dict] = []
     for rec in records:
@@ -168,6 +177,10 @@ def build_digest(
     # is false — it saw them, just not this week.
     d.shadow = build_report(calls, [o for o in outcomes if o.finding_id in calls])
 
+    d.confirm_within = confirm_within
+    d.unconfirmed = unconfirmed_actions(calls_from_audit(records), outcomes, now=end,
+                                        confirm_within=parse_duration(confirm_within))
+
     d.alerts = _alerts(d)
     return d
 
@@ -183,6 +196,13 @@ def _alerts(d: Digest) -> list[str]:
                 "it changed" if d.dry_run else "live execution is enabled")
         out.append(f"{d.executed_containments} containment action(s) actually EXECUTED in this "
                    f"window; {mode}.")
+    overdue = [u for u in d.unconfirmed if u.overdue]
+    if overdue:
+        ages = [u.age_hours for u in overdue if u.age_hours is not None]
+        oldest = f"the oldest for {max(ages):.0f}h" if ages else "at a time the record doesn't give"
+        out.append(f"{len(overdue)} autonomous action(s) have had no recorded outcome for more than "
+                   f"{d.confirm_within}, {oldest}. Nobody has said whether Kronagent was right. Nothing "
+                   f"has been released. Run `outcome.py pending`.")
     if d.findings == 0:
         out.append("No findings were processed in this window. If a connection is healthy, "
                    "this is how an ingestion wiring fault presents — check the boot log and "
@@ -231,6 +251,13 @@ def render_markdown(d: Digest) -> str:
         f"{d.approvals_pending} pending{oldest}",
     ]
     lines += [f"- ⚠ {w}" for w in d.oversight_warnings] or ["- no degradation signals (all-time)"]
+    if d.unconfirmed:
+        lines.append(f"- autonomous actions awaiting an outcome (all-time): {len(d.unconfirmed)}")
+        lines += [f"  - `{u.finding_id}` {', '.join(u.action_classes)}, "
+                  f"{'time unknown' if u.age_hours is None else f'{u.age_hours:.0f}h ago'}"
+                  f"{' — OVERDUE' if u.overdue else ''}" for u in d.unconfirmed]
+    else:
+        lines.append("- autonomous actions awaiting an outcome: none")
     lines += ["", "## Against the team", "```", render_text(d.shadow), "```", ""]
     lines.append("_No model-written text is included in this digest. Notes under "
                  "disagreements are the analysts' own._")

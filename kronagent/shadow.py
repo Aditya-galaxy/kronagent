@@ -72,6 +72,11 @@ class KronagentCall(BaseModel):
     # The subset the policy engine let run with nobody asked: (action_class,
     # provider) for every auto_execute disposition.
     unattended_actions: list[tuple[str, str]] = Field(default_factory=list)
+    # When the first of those was decided, and which of them really ran (as
+    # opposed to dry-run): the action classes whose containment record says
+    # executed.
+    unattended_at: str = ""
+    executed_unattended: list[str] = Field(default_factory=list)
 
 
 def calls_from_audit(records: Iterable[dict]) -> dict[str, KronagentCall]:
@@ -118,6 +123,14 @@ def calls_from_audit(records: Iterable[dict]) -> dict[str, KronagentCall]:
                 if action.get("action_class"):
                     calls[fid].unattended_actions.append(
                         (str(action["action_class"]), str(action.get("provider") or "")))
+                    calls[fid].unattended_at = calls[fid].unattended_at or rec.get("ts", "")
+        elif stage == "containment":
+            # The pipeline writes an action's containment record straight after
+            # its policy record, so a class that was auto_execute and shows up
+            # here as executed ran with nobody asked.
+            ran = str(payload.get("action_class") or "")
+            if payload.get("executed") is True and any(cls == ran for cls, _ in calls[fid].unattended_actions):
+                calls[fid].executed_unattended.append(ran)
     return calls
 
 
