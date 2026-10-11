@@ -59,6 +59,21 @@ hard part. Kronagent's answer is **earn-trust, graduated autonomy**:
   minutes unless someone confirms" would hand a real attacker their access
   back whenever nobody was watching: a review that fails open. Silence here
   costs noise, never containment.
+- **Undoing an action is a person's decision, and Kronagent can run it.**
+  `approve.py executed` lists what is contained right now, and
+  `approve.py release <finding_id> <action_class> --reason "..."` undoes one
+  action. The target and its parameters come from the audit record of what
+  Kronagent did, never from the command line, so a release can't be aimed at a
+  key or an address Kronagent never touched. The request is audited with who
+  and why before anything changes, it needs the same permission as approving
+  containment, and it honors dry-run and the kill switch. A release works from
+  the resource's current state, so it is safe to run twice: removing an IP
+  block deletes that address's own deny rules and leaves every other rule in
+  the NACL alone. Two AWS actions are supported so far: re-activating an
+  access key and removing an IP block. For any other action the command says
+  it can't run the release and prints the manual steps. Both have been run
+  against moto's emulation of AWS, and **neither has run against a real AWS
+  account.**
 - **Trust is re-earned, not inherited.** A promotion can carry a TTL
   (`--expires-in 90d`) and names an **owner** — the person accountable for it
   now, asked to renew it, and reassignable as people change teams (distinct

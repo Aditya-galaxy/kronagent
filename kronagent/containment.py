@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from .config import Settings
-from .schemas import ActionOutcome, PolicyDecision, ProposedAction
+from .schemas import ActionOutcome, PolicyDecision, ProposedAction, ReleaseOutcome
 
 
 class ContainmentAdapter(Protocol):
@@ -35,6 +35,13 @@ class ContainmentAdapter(Protocol):
 
     def plan(self, action: ProposedAction) -> tuple[list[str], str, str]: ...
     async def perform(self, action: ProposedAction) -> tuple[str, str]: ...
+
+    # Optional. An adapter that can undo an action implements both:
+    #   plan_release(action) -> (api_calls, summary), or None if it can't undo
+    #                           this action class;
+    #   async release(action) -> detail of what was undone.
+    # A release works from the resource's current state, not from numbers
+    # remembered when the action ran, so it is safe to run twice.
 
 
 class ContainmentExecutor:
@@ -94,3 +101,34 @@ class ContainmentExecutor:
                 rollback_hint=rollback_hint, api_calls=api_calls,
                 error=str(exc),
             )
+
+    async def release(self, action: ProposedAction) -> ReleaseOutcome:
+        """Undo a containment action Kronagent took. Only ever called for a
+        person (approve.py release): nothing in the pipeline releases anything,
+        and nothing releases on a timer. Honors dry_run exactly as execution
+        does. An adapter or action class with no release says so and gives the
+        person the manual steps instead of pretending."""
+        adapter = self._adapter(action)
+        _, rollback_hint, _ = adapter.plan(action)
+        planner = getattr(adapter, "plan_release", None)
+        planned = planner(action) if planner is not None else None
+        if planned is None:
+            return ReleaseOutcome(
+                action_class=action.action_class, target=action.target, released=False,
+                dry_run=self._settings.dry_run, supported=False,
+                detail=(f"Kronagent can't run the release for {action.action_class.value} on "
+                        f"{action.provider}. By hand: {rollback_hint}"))
+        api_calls, summary = planned
+        if self._settings.dry_run:
+            return ReleaseOutcome(
+                action_class=action.action_class, target=action.target, released=False, dry_run=True,
+                detail=f"DRY-RUN — would release: {summary}", api_calls=api_calls)
+        try:
+            detail = await adapter.release(action)
+            return ReleaseOutcome(
+                action_class=action.action_class, target=action.target, released=True, dry_run=False,
+                detail=f"RELEASED — {detail}", api_calls=api_calls)
+        except Exception as exc:  # noqa: BLE001 - surface the failure, never crash
+            return ReleaseOutcome(
+                action_class=action.action_class, target=action.target, released=False, dry_run=False,
+                detail=f"RELEASE FAILED — {type(exc).__name__}: {exc}", api_calls=api_calls, error=str(exc))

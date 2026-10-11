@@ -312,6 +312,52 @@ class AwsContainmentAdapter:
             )
         return ([f"# no AWS planner for {ac.value}"], "unknown", f"unhandled action {ac.value}")
 
+    # ── release: undoing what perform did, when a person asks ─────────────────
+
+    def plan_release(self, action: ProposedAction) -> Optional[tuple[list[str], str]]:
+        """The calls a release would make, or None for an action class this
+        adapter can't undo yet. Two are supported. Both work from the
+        resource's current state, so running one twice does nothing the second
+        time."""
+        ac, t = action.action_class, action.target
+        if ac == ActionClass.DISABLE_ACCESS_KEY:
+            user = action.parameters.get("user_name", "")
+            return ([f"iam.update_access_key(UserName='{user}', AccessKeyId='{t}', Status='Active')"],
+                    f"re-activate access key {t}")
+        if ac == ActionClass.BLOCK_IP:
+            nacl = self._quarantine_nacl or "<KRONAGENT_QUARANTINE_NACL_ID unset>"
+            return ([f"ec2.describe_network_acls(NetworkAclIds=['{nacl}'])  # find this address's deny rules",
+                     f"ec2.delete_network_acl_entry(NetworkAclId='{nacl}', RuleNumber=<each deny rule for "
+                     f"{t}/32>, Egress=<its direction>)"],
+                    f"remove the deny rules for {t} from the quarantine NACL {nacl}")
+        return None
+
+    async def release(self, action: ProposedAction) -> str:
+        return await asyncio.to_thread(self._release_sync, action)
+
+    def _release_sync(self, action: ProposedAction) -> str:
+        ac, t, tid = action.action_class, action.target, action.tenant_id
+        if ac == ActionClass.DISABLE_ACCESS_KEY:
+            user = action.parameters.get("user_name", "")
+            self._aws_call(self._iam_client(tid).update_access_key, UserName=user, AccessKeyId=t, Status="Active")
+            return f"access key {t} set Active"
+        if ac == ActionClass.BLOCK_IP:
+            if not self._quarantine_nacl:
+                raise RuntimeError("KRONAGENT_QUARANTINE_NACL_ID is not configured")
+            ec2 = self._ec2_client(tid)
+            desc = self._aws_call(ec2.describe_network_acls, NetworkAclIds=[self._quarantine_nacl])
+            # Only this address's own deny rules. Nothing else in the NACL is
+            # touched, whatever its rule numbers were when the block was made.
+            ours = [e for e in desc["NetworkAcls"][0]["Entries"]
+                    if e.get("CidrBlock") == f"{t}/32" and e.get("RuleAction") == "deny"]
+            for entry in ours:
+                self._aws_call(ec2.delete_network_acl_entry, NetworkAclId=self._quarantine_nacl,
+                               RuleNumber=entry["RuleNumber"], Egress=entry["Egress"])
+            if not ours:
+                return f"no deny rule for {t} was present in {self._quarantine_nacl}; nothing to remove"
+            return f"removed {len(ours)} deny rule(s) for {t} from quarantine NACL {self._quarantine_nacl}"
+        raise RuntimeError(f"no release for {ac.value}")
+
     def _aws_call(self, func, *args, **kwargs):
         import time
         from botocore.exceptions import ClientError

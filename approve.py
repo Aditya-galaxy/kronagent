@@ -42,6 +42,7 @@ from kronagent.oversight import (
     compute_metrics,
 )
 from kronagent.providers import build_containment_adapters
+from kronagent.release import containments_from_audit
 from kronagent.schemas import AuditRecord, BlastRadius, PolicyDecision
 
 
@@ -266,6 +267,84 @@ def cmd_approve(store: ApprovalStore, audit: AuditLog, settings: Settings,
     return 0
 
 
+def cmd_executed(audit: AuditLog, settings: Settings, args: argparse.Namespace) -> int:
+    """What Kronagent has contained and not yet released: what `release` can undo."""
+    found = containments_from_audit(audit.records(), include_dry_run=settings.dry_run)
+    if not args.all:
+        found = [c for c in found if c.released_at is None]
+    if not found:
+        print("Nothing contained" + ("." if args.all else " that hasn't been released."))
+        return 0
+    for c in found:
+        how = f"approved ({c.approved_request})" if c.approved_request else "unattended"
+        state = (f"released {c.released_at} by {c.released_by}" if c.released_at
+                 else ("in place" if c.executed else "dry-run: would be in place"))
+        print(f"{c.finding_id}  {c.action.action_class.value}  {c.action.target}  [{c.action.provider}]  "
+              f"{how}  {c.at}  — {state}")
+    return 0
+
+
+def cmd_release(audit: AuditLog, settings: Settings, actor: AuthContext, args: argparse.Namespace) -> int:
+    """Undo one containment action Kronagent took. The target comes from the
+    audit record of what was done, not from this command line."""
+    live = [c for c in containments_from_audit(audit.records(), include_dry_run=settings.dry_run)
+            if c.released_at is None and c.finding_id == args.finding_id
+            and c.action.action_class.value == args.action_class
+            and (args.target is None or c.action.target == args.target)]
+    # The same action on the same target can have run more than once (a
+    # redelivered finding); one release undoes it, so collapse them.
+    by_target = {c.action.target: c for c in live}
+    if not by_target:
+        print(f"Nothing to release: Kronagent has no {args.action_class} in place for finding "
+              f"{args.finding_id}" + (f" on {args.target}" if args.target else "")
+              + ". See `approve.py executed`.", file=sys.stderr)
+        return 2
+    if len(by_target) > 1:
+        print(f"{args.action_class} is in place on several targets for {args.finding_id}: "
+              f"{', '.join(sorted(by_target))}. Name one with --target.", file=sys.stderr)
+        return 2
+    if settings.kill_switch:
+        print("KILL SWITCH ENGAGED — Kronagent changes nothing while it is on, a release included. "
+              "Disengage KRONAGENT_KILL_SWITCH to proceed.", file=sys.stderr)
+        return 3
+    (containment,) = by_target.values()
+    action = containment.action
+    executor = ContainmentExecutor(settings, build_containment_adapters(settings))
+
+    # The decision is recorded before anything is changed, the result after.
+    async def _run():
+        await audit.record(AuditRecord(
+            finding_id=containment.finding_id, stage="release_request",
+            payload={"action_class": action.action_class.value, "target": action.target,
+                     "provider": action.provider, "reason": args.reason,
+                     "contained_at": containment.at,
+                     "contained_by": containment.approved_request or "policy (unattended)",
+                     **actor.audit_fields()},
+        ))
+        outcome = await executor.release(action)
+        await audit.record(AuditRecord(
+            finding_id=containment.finding_id, stage="release",
+            payload={**outcome.model_dump(), "provider": action.provider, "reason": args.reason,
+                     **actor.audit_fields()},
+        ))
+        return outcome
+
+    outcome = asyncio.run(_run())
+    print(f"Release of {action.action_class.value} on {action.target} requested by {actor.label}.")
+    print(f"  {outcome.detail}")
+    for call in outcome.api_calls:
+        print(f"    {call}")
+    if outcome.released:
+        print("  If this containment was a mistake, record it, so the action class's evidence shows it:")
+        print(f"    python3 outcome.py record {containment.finding_id} --verdict benign --action no_action "
+              f"--by <you>")
+        return 0
+    if outcome.dry_run and outcome.supported:
+        print("  (DRY-RUN active — nothing was changed. Set KRONAGENT_DRY_RUN=false to release for real.)")
+        return 0
+    return 1 if outcome.error else (5 if not outcome.supported else 0)
+
+
 def main() -> int:
     settings = Settings.from_env()
     store = ApprovalStore(settings.approval_store_path)
@@ -303,9 +382,26 @@ def main() -> int:
     p_deny.add_argument("request_id")
     _add_identity(p_deny)
 
+    p_exec = sub.add_parser("executed", help="containment actions in place: what `release` can undo")
+    p_exec.add_argument("--all", action="store_true", help="include ones already released")
+
+    p_rel = sub.add_parser(
+        "release", help="undo a containment action Kronagent took (a person's decision; nothing "
+                        "is ever released automatically)")
+    p_rel.add_argument("finding_id")
+    p_rel.add_argument("action_class")
+    p_rel.add_argument("--target", help="which target, when the action is in place on several")
+    _add_identity(p_rel)
+
     args = parser.parse_args()
     if args.command == "list":
         return cmd_list(store, args)
+    if args.command == "executed":
+        return cmd_executed(audit, settings, args)
+    if args.command == "release":
+        # APPROVE: taking containment away is as consequential as authorising it.
+        actor = _resolve(settings, audit, args, Permission.APPROVE)
+        return cmd_release(audit, settings, actor, args)
     if args.command == "show":
         return cmd_show(store, args)
     if args.command == "stats":

@@ -119,3 +119,54 @@ def test_moto_revoke_role_sessions_success() -> None:
     assert doc["Statement"][0]["Action"] == "*"
     assert doc["Statement"][0]["Resource"] == "*"
     assert "DateLessThan" in doc["Statement"][0]["Condition"]
+
+
+# --- release: contain, then undo, against emulated AWS ------------------------
+
+@mock_aws
+def test_moto_access_key_is_disabled_then_released_to_active() -> None:
+    iam = boto3.client("iam", region_name="us-east-1")
+    iam.create_user(UserName="svc-backup")
+    key_id = iam.create_access_key(UserName="svc-backup")["AccessKey"]["AccessKeyId"]
+    adapter = AwsContainmentAdapter(region="us-east-1")
+    action = ProposedAction(provider="aws", action_class=ActionClass.DISABLE_ACCESS_KEY, target=key_id,
+                            rationale="exfiltration", parameters={"user_name": "svc-backup"})
+
+    def status() -> str:
+        return iam.list_access_keys(UserName="svc-backup")["AccessKeyMetadata"][0]["Status"]
+
+    adapter._perform_sync(action)
+    assert status() == "Inactive"
+    assert adapter.plan_release(action)[0] == [
+        f"iam.update_access_key(UserName='svc-backup', AccessKeyId='{key_id}', Status='Active')"]
+    assert adapter._release_sync(action) == f"access key {key_id} set Active"
+    assert status() == "Active"
+    adapter._release_sync(action)                      # a second release changes nothing
+    assert status() == "Active"
+
+
+@mock_aws
+def test_moto_ip_block_is_released_and_nothing_else_in_the_nacl_is_touched() -> None:
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+    vpc_id = ec2.create_vpc(CidrBlock="10.0.0.0/16")["Vpc"]["VpcId"]
+    nacl_id = ec2.create_network_acl(VpcId=vpc_id)["NetworkAcl"]["NetworkAclId"]
+    # Rules that are not ours: another blocked address, and an allow rule for the same one.
+    ec2.create_network_acl_entry(NetworkAclId=nacl_id, RuleNumber=100, Protocol="-1", RuleAction="deny",
+                                 Egress=False, CidrBlock="203.0.113.9/32")
+    ec2.create_network_acl_entry(NetworkAclId=nacl_id, RuleNumber=50, Protocol="6", RuleAction="allow",
+                                 Egress=False, CidrBlock="198.51.100.42/32", PortRange={"From": 443, "To": 443})
+    adapter = AwsContainmentAdapter(region="us-east-1", quarantine_nacl_id=nacl_id)
+    action = ProposedAction(provider="aws", action_class=ActionClass.BLOCK_IP, target="198.51.100.42",
+                            rationale="c2")
+
+    def rules() -> set[tuple]:
+        entries = ec2.describe_network_acls(NetworkAclIds=[nacl_id])["NetworkAcls"][0]["Entries"]
+        return {(e["RuleNumber"], e["Egress"], e["RuleAction"], e.get("CidrBlock")) for e in entries}
+
+    before = rules()
+    adapter._perform_sync(action)
+    assert len(rules() - before) == 2                   # one deny each way for this address
+    assert "removed 2 deny rule(s) for 198.51.100.42" in adapter._release_sync(action)
+    assert rules() == before                            # the other block and the allow rule are still there
+    assert "nothing to remove" in adapter._release_sync(action)
+    assert rules() == before

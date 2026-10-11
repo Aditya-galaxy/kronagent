@@ -173,6 +173,21 @@ class ActionOutcome(BaseModel):
     error: Optional[str] = None
 
 
+class ReleaseOutcome(BaseModel):
+    """What happened when a person asked for a containment action to be undone."""
+
+    model_config = ConfigDict(frozen=True)
+
+    action_class: ActionClass
+    target: str
+    released: bool           # False in dry-run, when unsupported, and on failure
+    dry_run: bool
+    supported: bool = True   # False: Kronagent can't run this release; the hint is for a person
+    detail: str
+    api_calls: list[str] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
 class AuditRecord(BaseModel):
     """One immutable audit entry. Hash-chained in the audit log."""
 
