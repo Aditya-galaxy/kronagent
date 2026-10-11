@@ -68,7 +68,9 @@ from kronagent.audit import AuditLog
 from kronagent.classification import providers_for
 from kronagent.config import Settings
 from kronagent.connect import BINDABLE_PROVIDERS, tenant_environment
-from kronagent.evidence import ActionEvidence, build_evidence, render_text as render_evidence
+from kronagent.evidence import (
+    ActionEvidence, build_evidence, render_text as render_evidence, unwarranted_autonomy,
+)
 from kronagent.identity import (
     DEFAULT_TENANT, AuthContext, AuthorizationError, Permission, owner_vacancy_checker,
     resolve_actor,
@@ -433,6 +435,21 @@ def _evidence(settings: Settings, audit: AuditLog, action_class: str,
                           providers=providers, max_error=settings.promotion_max_error, since=since)
 
 
+def _unwarranted(settings: Settings, audit: AuditLog, store: AllowlistStore) -> dict[str, list[str]]:
+    """Promoted classes that ran unattended on a finding the team judged
+    unwarranted. outcome.py suspends them as the outcome is recorded; this is
+    the same check for every other way an outcome can arrive."""
+    from kronagent.orchestrator import get_tenant_path
+    from kronagent.shadow import calls_from_audit
+
+    outcomes = OutcomeStore(get_tenant_path(settings.outcome_store_path, DEFAULT_TENANT))
+    try:
+        recorded = outcomes.list()
+    except ValueError:
+        return {}       # an unreadable outcome store is outcome.py's error to report, not a reason to block governance
+    return unwarranted_autonomy(calls_from_audit(audit.records()), recorded, store.list())
+
+
 def cmd_evidence(audit: AuditLog, settings: Settings, args: argparse.Namespace) -> int:
     ac = _parse_action_class(args.action_class)
     since = None
@@ -708,6 +725,10 @@ def main() -> int:
         print(f"SUSPENDED: {entry.action_class} — {moved}; it requires human approval until "
               f"renewed for the account it now runs in (recorded in the audit log).",
               file=sys.stderr)
+    for entry, reason in asyncio.run(store.suspend_unwarranted(_unwarranted(settings, audit, store),
+                                                               audit=audit)):
+        print(f"SUSPENDED: {entry.action_class} — it {reason}; it requires human approval until "
+              f"renewed (recorded in the audit log).", file=sys.stderr)
     for entry, drift in asyncio.run(store.suspend_reclassified(audit=audit)):
         print(f"SUSPENDED: {entry.action_class} — {drift}; it requires human approval until "
               f"renewed against its current classification (recorded in the audit log).",

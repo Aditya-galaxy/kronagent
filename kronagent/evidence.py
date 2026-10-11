@@ -40,6 +40,11 @@ What the bound does not cover, stated wherever it is shown:
     the autonomy, the expiry makes it be earned again.
   * Evidence is per tenant and per provider. It is not yet per AWS account.
 
+The same records also take autonomy away. `unwarranted_autonomy` finds promoted
+classes that ran unattended on a finding the team then judged unwarranted, and
+the allowlist suspends them (AllowlistStore.suspend_unwarranted) until someone
+renews them. Evidence can end a promotion on its own; only a person can make one.
+
 Nothing here changes a decision on a finding. It reads records already written.
 """
 # SPDX-License-Identifier: LicenseRef-PolyForm-Noncommercial-1.0.0
@@ -49,13 +54,16 @@ Nothing here changes a decision on a finding. It reads records already written.
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 from pydantic import BaseModel, Field
 
 from .outcomes import AnalystOutcome
 from .shadow import KronagentCall
 from .stats import binomial_upper_bound, clean_trials_needed
+
+if TYPE_CHECKING:
+    from .allowlist import AllowlistEntry
 
 DEFAULT_CONFIDENCE = 0.95
 
@@ -139,6 +147,46 @@ def build_evidence(calls: dict[str, KronagentCall], outcomes: Iterable[AnalystOu
         if not ev.meets_bar:
             ev.clean_findings_still_needed = _still_needed(ev.unwarranted, ev.scored, max_error, confidence)
     return ev
+
+
+def unwarranted_autonomy(calls: dict[str, KronagentCall], outcomes: Iterable[AnalystOutcome],
+                         entries: Iterable["AllowlistEntry"]) -> dict[str, list[str]]:
+    """Promoted action classes that ran unattended on a finding the team then
+    judged unwarranted: {action_class: [finding ids]}.
+
+    This is the evidence that takes autonomy away. Three conditions, all needed:
+
+      * the policy engine's disposition for that action was auto_execute, on a
+        provider the entry covers. An action a person approved is that person's
+        decision, not the entry's;
+      * the finding arrived after the entry was promoted or last renewed. A
+        renewal is a fresh decision made knowing the record, so an old finding
+        can't undo it;
+      * the recorded outcome is conclusive and unwarranted: the verdict was
+        benign, or the team took no action.
+    """
+    from .allowlist import parse_ts
+
+    by_finding = {o.finding_id: o for o in outcomes}
+    found: dict[str, list[str]] = {}
+    for entry in entries:
+        if entry.is_expired() or entry.is_suspended:
+            continue
+        since = parse_ts(entry.promoted_at)
+        for fid in sorted(calls, key=lambda f: (calls[f].first_seen, f)):
+            call, outcome = calls[fid], by_finding.get(fid)
+            if outcome is None or outcome.verdict == "inconclusive":
+                continue
+            if not (outcome.verdict == "benign" or outcome.team_action == "no_action"):
+                continue
+            if not any(cls == entry.action_class and entry.covers(provider)
+                       for cls, provider in call.unattended_actions):
+                continue
+            seen = parse_ts(call.first_seen)
+            if since is not None and (seen is None or seen < since):
+                continue
+            found.setdefault(entry.action_class, []).append(fid)
+    return found
 
 
 def _still_needed(unwarranted: int, scored: int, max_error: float, confidence: float) -> int:

@@ -40,6 +40,15 @@ hard part. Kronagent's answer is **earn-trust, graduated autonomy**:
   the bound assumes next month's findings resemble this month's. An attacker
   can change what arrives, which is why a promotion still has an owner and an
   expiry.
+- **Evidence can end a promotion on its own; only a person can make one.**
+  If a promoted class acts with nobody asked, and the team then records that
+  finding as benign or as needing no action, the class is suspended at once,
+  where the outcome is recorded (`outcome.py record`). It routes back to human
+  approval until someone renews it. Three things keep that narrow. An action a
+  person approved is that person's decision and suspends nothing. A finding
+  from before the promotion, or before its last renewal, can't undo a decision
+  made knowing the record. And revising the outcome afterwards doesn't hand
+  the autonomy back: whether to trust the class again is a person's question.
 - **Trust is re-earned, not inherited.** A promotion can carry a TTL
   (`--expires-in 90d`) and names an **owner** — the person accountable for it
   now, asked to renew it, and reassignable as people change teams (distinct

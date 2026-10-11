@@ -141,6 +141,7 @@ def _seed_scope(action_class: str) -> Optional[list[str]]:
 SUSPENDED_OWNER_VACANT = "owner_vacant"
 SUSPENDED_RECLASSIFIED = "reclassified"
 SUSPENDED_ENVIRONMENT_CHANGED = "environment_changed"
+SUSPENDED_UNWARRANTED = "unwarranted_outcome"
 
 # Returns {provider: account-or-None} for the tenant; may raise when the
 # account cannot be determined. Built by `connect.tenant_environment`, injected.
@@ -799,6 +800,55 @@ class AllowlistStore:
                     "promoted_by": entry.promoted_by, "promoted_at": entry.promoted_at,
                     "promotion_reason": entry.reason, "expires_at": entry.expires_at,
                     "last_fired_at": entry.last_fired_at, "fire_count": entry.fire_count,
+                    "identity_verified": False, "auth_method": "system",
+                },
+            ))
+        return suspended
+
+    async def suspend_unwarranted(
+        self, offences: dict[str, list[str]], *, audit: AuditLog, now: Optional[datetime] = None,
+    ) -> list[tuple[AllowlistEntry, str]]:
+        """Latch a suspension on every entry that acted unattended on a finding
+        the team judged unwarranted.
+
+        `offences` is {action_class: [finding ids]} from
+        `evidence.unwarranted_autonomy`, which holds the rules for what counts.
+        An entry earned its autonomy from a record of being right; a recorded
+        case of being wrong, while holding it, withdraws it. As with every
+        other trigger, only a renewal lifts it: revising the outcome afterwards
+        does not, because the question of whether to trust the class again is
+        a person's to answer. Idempotent — suspended entries are skipped.
+        """
+        now = now or _utcnow()
+        data = self._read_all()
+        suspended = []
+        for entry in self.list():
+            findings = offences.get(entry.action_class)
+            if not findings or entry.is_expired(now) or entry.is_suspended:
+                continue
+            reason = (f"ran unattended on {len(findings)} finding(s) the team judged unwarranted: "
+                      f"{', '.join(findings)}")
+            raw = data[entry.action_class]
+            raw["suspended_at"] = now.isoformat()
+            raw["suspended_trigger"] = SUSPENDED_UNWARRANTED
+            raw["suspended_reason"] = reason
+            suspended.append((AllowlistEntry.model_validate(raw), reason))
+        if not suspended:
+            return []
+        self._write_all(data)
+        for entry, reason in suspended:
+            await audit.record(AuditRecord(
+                finding_id="_governance", stage="governance",
+                payload={
+                    "decision": "allowlist_suspended", "action_class": entry.action_class,
+                    "trigger": SUSPENDED_UNWARRANTED,
+                    "by": "system", "reason": reason,
+                    "findings": offences[entry.action_class],
+                    "owner": entry.owner,
+                    "promoted_by": entry.promoted_by, "promoted_at": entry.promoted_at,
+                    "promotion_reason": entry.reason, "expires_at": entry.expires_at,
+                    "last_fired_at": entry.last_fired_at, "fire_count": entry.fire_count,
+                    "evidence_at_promotion": entry.evidence,
                     "identity_verified": False, "auth_method": "system",
                 },
             ))

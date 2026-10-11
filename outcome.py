@@ -28,8 +28,10 @@ import json
 import os
 import sys
 
+from kronagent.allowlist import AllowlistStore
 from kronagent.audit import AuditLog
 from kronagent.config import Settings
+from kronagent.evidence import unwarranted_autonomy
 from kronagent.identity import AuthContext, AuthorizationError, Permission, resolve_actor
 from kronagent.orchestrator import get_tenant_path
 from kronagent.outcomes import AnalystOutcome, OutcomeStore
@@ -93,7 +95,20 @@ def cmd_record(settings: Settings, audit: AuditLog, store: OutcomeStore,
               if previous else "")
     print(f"Recorded {stored.verdict}/{stored.team_action} for {stored.finding_id} "
           f"by {stored.recorded_by}{change}.")
+    for entry, reason in suspend_unwarranted_autonomy(settings, audit, store, args.tenant):
+        print(f"SUSPENDED: {entry.action_class} — it {reason}. It requires human approval again "
+              f"until {entry.owner} or another operator renews it (recorded in the audit log).")
     return 0
+
+
+def suspend_unwarranted_autonomy(settings: Settings, audit: AuditLog, store: OutcomeStore,
+                                 tenant: str) -> list:
+    """An outcome can show that a promoted action class acted, with nobody
+    asked, on something the team judged unwarranted. That withdraws its
+    autonomy at once, here, where the outcome is recorded."""
+    allowlist = AllowlistStore(get_tenant_path(settings.allowlist_store_path, tenant))
+    offences = unwarranted_autonomy(calls_from_audit(audit.records()), store.list(), allowlist.list())
+    return asyncio.run(allowlist.suspend_unwarranted(offences, audit=audit))
 
 
 def cmd_list(store: OutcomeStore) -> int:
