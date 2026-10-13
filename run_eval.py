@@ -15,6 +15,7 @@ along with 95% confidence intervals to account for sample size and label noise.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import asyncio
 import json
 import os
@@ -312,6 +313,8 @@ async def evaluate_pipeline(dataset_path: str, use_live: bool, allowlist_classes
     false_positives_under_authority = 0
     total_benign_count = 0
     adversarial_total = 0
+    advisory: Counter = Counter()
+    advisory_false_pages: list[str] = []
     adversarial_live_only = 0
     redirected_targets = 0
     
@@ -379,6 +382,25 @@ async def evaluate_pipeline(dataset_path: str, use_live: bool, allowlist_classes
         triage_actual_verdicts.append(actual_actionable)
         triage_expected_labels.append(expected_actionable)
         
+        # The advisory layer: what the correlation and commander agents said.
+        # Nothing here decides containment, but a page is a person woken up.
+        for r in records:
+            if r.stage == "correlation" and r.payload.get("part_of_campaign"):
+                links = r.payload.get("links") or []
+                advisory["campaign_claims"] += 1
+                advisory["links"] += len(links)
+                advisory["verified_links"] += sum(1 for link in links if link.get("indicator_backed"))
+                advisory["unverified_only_claims"] += not any(link.get("indicator_backed") for link in links)
+            if r.stage == "command" and r.payload.get("available"):
+                kind = "attack" if expected_actionable else "benign"
+                advisory[f"assessed_{kind}"] += 1
+                advisory["capped"] += bool(r.payload.get("capped"))
+                advisory["model_pages"] += bool(r.payload.get("model_escalate"))
+                if r.payload.get("escalate_to_human_now"):
+                    advisory[f"paged_{kind}"] += 1
+                    if kind == "benign":
+                        advisory_false_pages.append(f"{fid} ({r.payload.get('priority')})")
+
         # Determine containment correctness
         case_correct = True
         
@@ -525,6 +547,19 @@ async def evaluate_pipeline(dataset_path: str, use_live: bool, allowlist_classes
             print("        scored offline — the mock answers triage with the dataset's own")
             print("        label, so injected text never reaches a real model. Those cases")
             print("        are counted, not passed. Run with --live to score them.")
+        print("-" * 60)
+    if advisory["assessed_attack"] or advisory["assessed_benign"] or advisory["campaign_claims"]:
+        print("Advisory layer (correlation and incident commander; decides no containment):")
+        print(f"  Campaign claims: {advisory['campaign_claims']}  "
+              f"({advisory['unverified_only_claims']} with no link verified by a shared indicator)")
+        print(f"  Links claimed: {advisory['links']}  (verified {advisory['verified_links']}, "
+              f"model inference only {advisory['links'] - advisory['verified_links']})")
+        print(f"  Pages: attacks {advisory['paged_attack']} of {advisory['assessed_attack']} assessed; "
+              f"benign {advisory['paged_benign']} of {advisory['assessed_benign']} assessed")
+        print(f"  The model asked to page {advisory['model_pages']} time(s); the priority ceiling "
+              f"lowered {advisory['capped']} assessment(s).")
+        for item in advisory_false_pages:
+            print(f"    paged for a benign finding: {item}")
         print("-" * 60)
     print("False-Positive-Under-Authority (FPUA):")
     print(f"  FPUA Rate: {fpua_rate:.2%} (95% CI: {fpua_ci[0]:.2%} - {fpua_ci[1]:.2%})")
