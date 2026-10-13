@@ -176,6 +176,21 @@ hard part. Kronagent's answer is **earn-trust, graduated autonomy**:
   fence triage uses. What this doesn't do: an operator can't yet reject a
   single link directly, and the indicators are exact matches only (the same
   address, not the same network).
+- **A priority means something, because a model can't inflate it.** The
+  incident commander is advisory, and it used to be told to "weigh campaigns
+  heavily" without being told which campaign links had been checked. In a live
+  run it asked to page a person for 22 of 23 incidents, including two benign
+  findings whose only campaign link was the correlation agent's unverified
+  inference. Two changes. The commander now sees every link marked verified
+  (a shared indicator, checked by code) or unverified. And its priority passes
+  under a fixed ceiling set by severity, the triage verdict and verified links
+  only: high severity may page; medium severity pages only with a verified
+  campaign link; low severity never does. The model can make an incident less
+  urgent than the ceiling, never more, and the record keeps what it asked for.
+  Re-run on the same 41 cases: pages on benign findings went from 2 to 0, and
+  priorities spread across P1, P2 and P3 where they had been nearly all P1.
+  The cost is deliberate and visible: four real mid-severity attacks are now
+  queued for approval as P2 and no longer page anyone.
 - **Nothing is invisible.** Every decision — triage, policy, containment,
   approval, governance, forensics — is one entry in an append-only,
   SHA-256-chained audit log. Editing a past record breaks verification of

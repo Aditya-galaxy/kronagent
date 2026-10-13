@@ -68,6 +68,7 @@ class ScriptedLLM:
     async def structured(self, *, system, prompt, schema):
         self.calls += 1
         self.last_prompt = prompt
+        self.last_system = system
         return self._output
 
 
@@ -163,7 +164,7 @@ async def test_prompt_includes_every_specialist_assessment() -> None:
     assert "Threat-intelligence analyst" in p
     assert "T1552.005" in p                        # intel technique
     assert "Investigation / correlation analyst" in p
-    assert "PART OF A CAMPAIGN" in p               # correlation result
+    assert "The analyst links this to" in p        # correlation result
     assert "f-0" in p                              # the related finding
 
 
@@ -181,7 +182,7 @@ async def test_unavailable_specialists_are_marked_not_silently_dropped() -> None
 
 
 def test_formatter_distinguishes_campaign_from_isolated_alert() -> None:
-    assert "PART OF A CAMPAIGN" in _fmt_correlation(_correlation(campaign=True))
+    assert "The analyst links this to" in _fmt_correlation(_correlation(campaign=True))
     assert "isolated alert" in _fmt_correlation(_correlation(campaign=False))
     assert "unavailable" in _fmt_correlation(_correlation(available=False))
 
@@ -190,3 +191,76 @@ def test_formatter_handles_intel_with_no_mapped_techniques() -> None:
     empty = ThreatIntelAssessment(finding_id="f-1", available=True,
                                   mitre_techniques=[], attack_lifecycle_stage="Unknown")
     assert "none mapped" in _fmt_intel(empty)
+
+
+# --------------------------------------------------------------------------- #
+# Verified and unverified links, and the priority ceiling
+#
+# In a live run the commander was told to "weigh campaigns heavily" and never
+# told which links were checked. It paged for 22 of 23 incidents, including two
+# benign findings whose only campaign link was another model's inference.
+# --------------------------------------------------------------------------- #
+
+from kronagent.commander import priority_ceiling  # noqa: E402
+from kronagent.correlation import CorrelationLink  # noqa: E402
+from kronagent.sanitization import opaque_ref  # noqa: E402
+
+
+def _linked(*links: tuple[str, list[str]]) -> CorrelationAssessment:
+    return CorrelationAssessment(
+        finding_id="f-1", available=True, part_of_campaign=True,
+        related_finding_ids=[fid for fid, _ in links], campaign_narrative="story", correlation_summary="sum",
+        links=[CorrelationLink(finding_id=fid, basis=basis, indicator_backed=bool(basis)) for fid, basis in links])
+
+
+def _triage(actionable: bool = True, severity: float = 8.0) -> TriageVerdict:
+    return TriageVerdict(finding_id="f-1", is_actionable_threat=actionable, threat_category="c",
+                         confidence=0.9, severity=severity, justification="j")
+
+
+def test_the_commander_is_told_which_links_were_checked_and_never_reads_an_id() -> None:
+    text = _fmt_correlation(_linked(("eval-aws-attack-0001", ["same remote address 203.0.113.7"]),
+                                    ("eval-aws-benign-0008", [])))
+    assert "1 verified by a shared indicator, 1 unverified" in text
+    assert f"{opaque_ref('eval-aws-attack-0001')}: VERIFIED (same remote address 203.0.113.7)" in text
+    assert f"{opaque_ref('eval-aws-benign-0008')}: unverified (the analyst's inference only)" in text
+    assert "attack" not in text and "benign" not in text
+
+
+@pytest.mark.parametrize("severity, actionable, links, expected", [
+    (8.0, True, [], ("P1", True)),                                        # high severity: pageable on its own
+    (9.5, False, [], ("P1", True)),                                       # the floor already sends it to a person
+    (5.0, True, [("a", [])], ("P2", False)),                              # medium, only a hunch
+    (5.0, True, [("a", ["same remote address 1.2.3.4"])], ("P1", True)),  # medium, verified campaign
+    (3.0, True, [("a", []), ("b", [])], ("P3", False)),                   # the public-bucket case
+    (3.0, True, [("a", ["shared resource x"])], ("P2", False)),
+    (5.0, False, [("a", [])], ("P3", False)),                             # triage dismissed it
+])
+def test_the_ceiling_follows_severity_triage_and_verified_links(severity, actionable, links, expected) -> None:
+    corr = _linked(*links) if links else _correlation(campaign=False)
+    ceiling, may_page, why = priority_ceiling(_finding(severity=severity), _triage(actionable, severity), corr)
+    assert (ceiling, may_page) == expected and why
+
+
+async def test_a_low_severity_finding_with_only_a_hunch_is_not_paged_whatever_the_model_says() -> None:
+    llm = ScriptedLLM(_output(priority="P1", escalate_to_human_now=True))
+    result = await IncidentCommanderAgent(llm=llm).assess(
+        _finding(severity=3.0), _triage(True, 3.0), _intel(), _linked(("a", []), ("b", [])))
+    assert (result.priority, result.escalate_to_human_now) == ("P3", False)
+    assert (result.model_priority, result.model_escalate, result.capped) == ("P1", True, True)
+    assert result.priority_ceiling == "P3" and "no verified campaign link" in result.ceiling_reason
+    assert "unverified" in llm.last_prompt and "VERIFIED" in llm.last_system
+
+
+async def test_the_model_may_be_less_urgent_than_the_ceiling() -> None:
+    llm = ScriptedLLM(_output(priority="P3", escalate_to_human_now=False))
+    result = await IncidentCommanderAgent(llm=llm).assess(_finding(severity=8.0), _triage(), _intel(),
+                                                          _correlation(campaign=False))
+    assert (result.priority, result.escalate_to_human_now, result.capped) == ("P3", False, False)
+
+
+async def test_a_verified_campaign_keeps_its_urgency() -> None:
+    llm = ScriptedLLM(_output(priority="P1", escalate_to_human_now=True))
+    result = await IncidentCommanderAgent(llm=llm).assess(
+        _finding(severity=5.0), _triage(True, 5.0), _intel(), _linked(("a", ["same remote address 1.2.3.4"])))
+    assert (result.priority, result.escalate_to_human_now, result.capped) == ("P1", True, False)
