@@ -1,6 +1,6 @@
 # Kronagent
 
-**Autonomous AI threat-defense for enterprise networks — with guardrails you can audit.**
+**Autonomous AI threat response for cloud and Kubernetes that earns its autonomy, with guardrails you can audit.**
 
 Kronagent is an AI-native security platform built as a team of specialist agents: it ingests live findings from multi-cloud and cluster environments, triages and investigates them, synthesizes an incident assessment, preserves forensic evidence, and executes containment — with **graduated autonomy**, not blanket automation. Every decision is gated by a deterministic policy engine, every action is planned and logged before it runs, destructive actions always wait for a human, and the entire trail is a tamper-evident, hash-chained audit log.
 
