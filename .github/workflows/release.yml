@@ -1,0 +1,123 @@
+name: Release image
+
+# Publishes the container the in-account stack runs
+# (deploy/cloudformation/kronagent-in-account.json, parameter ImageUri).
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# The tag must match pyproject's version, the image must pass the same smoke
+# tests CI gives the core image plus the extras the stack depends on, and a
+# version that already exists is never overwritten: a customer's task that
+# restarts must get the bytes they installed, not whatever was pushed later.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/aditya-galaxy/kronagent
+  # What the in-account stack needs (AWS ingestion and containment, Claude on
+  # Bedrock for triage, Slack Socket Mode for approvals), plus the Kubernetes
+  # client so the Helm chart can run the same image.
+  EXTRAS: aws,bedrock,slack,k8s
+
+jobs:
+  publish:
+    name: build, verify, publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the package version
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "tag=$tag pyproject=$pkg"
+          [ "$tag" = "$pkg" ] || { echo "tag v$tag does not match pyproject version $pkg"; exit 1; }
+          echo "version=$pkg" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Refuse to overwrite a published version
+        run: |
+          if docker manifest inspect "$IMAGE:${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "$IMAGE:${{ steps.version.outputs.version }} already exists. Bump the version instead."
+            exit 1
+          fi
+
+      - name: Build
+        # Plain docker build, retried, for the reasons given in ci.yml's
+        # container job (Docker Hub rate limits on shared runner IPs).
+        run: |
+          for attempt in 1 2 3; do
+            if docker build --build-arg EXTRAS="$EXTRAS" \
+                 --build-arg VERSION="${{ steps.version.outputs.version }}" \
+                 --tag "$IMAGE:${{ steps.version.outputs.version }}" .; then
+              exit 0
+            fi
+            sleep $((attempt * 20))
+          done
+          exit 1
+
+      - name: Runs as non-root, defaults to dry-run, reports its version
+        run: |
+          img="$IMAGE:${{ steps.version.outputs.version }}"
+          [ "$(docker run --rm --entrypoint id "$img" -u)" != "0" ] || { echo "runs as root"; exit 1; }
+          docker run --rm --entrypoint python "$img" -c "
+          import importlib.metadata as m, sys
+          from kronagent.config import Settings
+          assert Settings.from_env().dry_run is True, 'not dry-run by default'
+          v = m.version('kronagent')
+          assert v == '${{ steps.version.outputs.version }}', v
+          print('version', v, 'dry-run default ok')
+          "
+
+      - name: The stack's extras are installed
+        run: |
+          docker run --rm --entrypoint python "$IMAGE:${{ steps.version.outputs.version }}" -c "
+          import boto3, kubernetes
+          from anthropic import AsyncAnthropicBedrockMantle
+          from websockets.asyncio.client import connect
+          from kronagent.llm import BedrockTriageClient
+          from kronagent.slack_socket import SlackSocketMode
+          print('boto3, kubernetes, anthropic[bedrock], websockets present')
+          "
+
+      - name: The agent loop runs and writes a verified audit chain to the volume
+        run: |
+          docker run -d --name kronagent-release "$IMAGE:${{ steps.version.outputs.version }}" \
+            kronagent-serve --host 0.0.0.0 --port 8000 --replay
+          for i in $(seq 1 60); do
+            if docker exec kronagent-release python -c "
+          import sys
+          from kronagent.audit import AuditLog
+          from kronagent.config import Settings
+          s = Settings.from_env()
+          ok, _ = AuditLog.verify(s.audit_log_path)
+          sys.exit(0 if ok and AuditLog.read_records(s.audit_log_path) else 1)
+          " 2>/dev/null; then
+              echo "verified after ${i}s"
+              docker rm -f kronagent-release >/dev/null
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs kronagent-release
+          docker rm -f kronagent-release >/dev/null
+          exit 1
+
+      - name: Publish
+        run: |
+          docker push "$IMAGE:${{ steps.version.outputs.version }}"
+          echo "published $IMAGE:${{ steps.version.outputs.version }}"
+          echo "First release only: make the package public (GitHub → your profile → Packages → kronagent → Package settings → Change visibility), or Fargate can't pull it."
