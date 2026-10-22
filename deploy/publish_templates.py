@@ -39,6 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from kronagent.aws_stack import render_stack  # noqa: E402
 from kronagent.connect import (  # noqa: E402
     AwsConnection,
     Grant,
@@ -82,6 +83,8 @@ def artifacts() -> dict[Path, dict]:
         DEPLOY / "cloudformation" / "kronagent-contain-role.json": render_template(
             _RENDER_STUB, Grant.CONTAIN,
             kronagent_account_id="${KronagentAccountId}", parameterized=True),
+        # Kronagent running inside the customer's own account (kronagent/aws_stack.py).
+        DEPLOY / "cloudformation" / "kronagent-in-account.json": render_stack(),
         # The standalone policy an operator attaches by hand per deploy/README.md
         # §3. It is the one artifact that includes terminate, because it is not
         # a grant a customer is asked to review — it is one an operator writes
