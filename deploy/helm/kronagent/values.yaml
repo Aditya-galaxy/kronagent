@@ -1,9 +1,9 @@
 replicaCount: 1
 
 image:
-  repository: kronagent
+  repository: ghcr.io/aditya-galaxy/kronagent
   pullPolicy: IfNotPresent
-  tag: "latest"
+  tag: "0.2.0"
 
 nameOverride: ""
 fullnameOverride: ""

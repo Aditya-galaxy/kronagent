@@ -47,7 +47,11 @@ RUN python -m venv /opt/venv \
 
 FROM python:3.13-slim AS runtime
 
+# Set by the release workflow; a local build reports "dev".
+ARG VERSION=dev
 LABEL org.opencontainers.image.title="Kronagent" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.source="https://github.com/Aditya-galaxy/kronagent" \
       org.opencontainers.image.description="Autonomous AI threat-defense with graduated autonomy and a tamper-evident audit log" \
       org.opencontainers.image.url="https://kronagent.com" \
       org.opencontainers.image.licenses="LicenseRef-PolyForm-Noncommercial-1.0.0"
