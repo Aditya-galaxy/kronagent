@@ -295,3 +295,26 @@ def test_cli_strict_treats_warnings_as_blocking(tmp_path) -> None:
         [sys.executable, str(REPO_ROOT / "run_preflight.py"), "--strict"],
         capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
     assert result.returncode == 1
+
+
+def test_a_bedrock_backend_that_cannot_be_built_warns(tmp_path, monkeypatch) -> None:
+    """KRONAGENT_LLM=bedrock without the SDK, a region or credentials degrades
+    to deterministic triage; preflight says so instead of claiming Gemini."""
+    from kronagent import llm
+
+    def unavailable():
+        raise llm.LLMUnavailableError("no region")
+    monkeypatch.setenv("KRONAGENT_LLM", "bedrock")
+    monkeypatch.setattr(llm, "BedrockTriageClient", unavailable)
+    check = _by_name(run_preflight(_settings(tmp_path)))["llm"]
+    assert check.status == "warn" and "no region" in check.detail
+
+
+def test_a_bedrock_backend_names_its_model(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from kronagent import llm
+    monkeypatch.setenv("KRONAGENT_LLM", "bedrock")
+    monkeypatch.setattr(llm, "BedrockTriageClient", lambda: SimpleNamespace(model="anthropic.claude-opus-5-5"))
+    check = _by_name(run_preflight(_settings(tmp_path)))["llm"]
+    assert check.status == "pass" and "anthropic.claude-opus-5-5" in check.detail

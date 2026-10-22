@@ -61,7 +61,7 @@ from typing import Deque, Iterable, Optional
 
 from pydantic import BaseModel, Field
 
-from .llm import GeminiTriageClient, LLMUnavailableError
+from .llm import LLMUnavailableError, TriageLLM
 from .model import Finding
 from .sanitization import opaque_ref
 
@@ -384,7 +384,7 @@ _FENCE = re.compile(r"<\s*/?\s*detector_text\s*>", re.IGNORECASE)
 
 
 class CorrelationAgent:
-    def __init__(self, llm: GeminiTriageClient | None) -> None:
+    def __init__(self, llm: TriageLLM | None) -> None:
         self._llm = llm
 
     async def assess(self, finding: Finding, prior: list[FindingSummary], *,

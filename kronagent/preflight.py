@@ -476,6 +476,26 @@ def _check_governance(settings: Settings, store: AllowlistStore) -> list[Check]:
 
 def _check_agents(settings: Settings) -> list[Check]:
     checks: list[Check] = []
+    backend = os.getenv("KRONAGENT_LLM", "gemini").strip().lower()
+    if backend != "gemini":
+        from .llm import LLMUnavailableError, build_triage_client
+        try:
+            _, model = build_triage_client()
+        except LLMUnavailableError as exc:
+            checks.append(Check(
+                "llm", "warn",
+                f"KRONAGENT_LLM={backend} but the model client can't be built ({exc}) — the "
+                "pipeline degrades to deterministic triage.",
+                fix="Install kronagent[bedrock], set AWS_REGION, and enable model access in the "
+                    "Bedrock console; or unset KRONAGENT_LLM.",
+                section="agents",
+            ))
+        else:
+            checks.append(Check("llm", "pass",
+                                f"{backend} triage configured ({model}). Model access itself is "
+                                "only proven by the first call.",
+                                section="agents"))
+        return checks
     if os.getenv("GEMINI_API_KEY"):
         checks.append(Check("llm", "pass",
                             "GEMINI_API_KEY set — triage, intel, correlation and command "

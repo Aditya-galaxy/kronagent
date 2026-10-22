@@ -286,11 +286,11 @@ async def evaluate_pipeline(dataset_path: str, use_live: bool, allowlist_classes
     # LLM selection
     if use_live:
         try:
-            from kronagent.llm import GeminiTriageClient
-            llm = GeminiTriageClient()
-            print("Using live Gemini API for evaluation.")
+            from kronagent.llm import build_triage_client
+            llm, model = build_triage_client()
+            print(f"Using live model for evaluation: {model}")
         except Exception as exc:
-            print(f"Failed to initialize live Gemini Client: {exc}. Aborting.")
+            print(f"Failed to initialize the live model client: {exc}. Aborting.")
             temp_dir.cleanup()
             return 1
     else:
