@@ -294,7 +294,11 @@ destructive ones `APPROVAL`.
 Everything runs in **dry-run** (`KRONAGENT_DRY_RUN=true` is the default). No
 cloud or cluster is contacted, and no credentials are needed. An LLM key is
 optional — without `GEMINI_API_KEY` the pipeline falls back to deterministic
-triage and keeps working.
+triage and keeps working. To keep findings inside your own AWS account, use
+Claude in Amazon Bedrock instead: `pip install ".[bedrock]"`, set
+`KRONAGENT_LLM=bedrock` and `AWS_REGION`, and enable model access in the Bedrock
+console (`KRONAGENT_BEDROCK_MODEL` overrides the default,
+`anthropic.claude-opus-5-5`).
 
 Then open the console:
 

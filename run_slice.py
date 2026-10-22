@@ -21,7 +21,9 @@ Safety posture (all overridable via env, all default safe):
     KRONAGENT_KILL_SWITCH=false            # global halt of all containment
     KRONAGENT_MIN_SEVERITY=4.0             # below this: alert only
     KRONAGENT_QUARANTINE_SG_ID=            # required for real instance isolation
-    GEMINI_API_KEY=...                 # triage enrichment (optional; degrades)
+    KRONAGENT_LLM=gemini               # triage model backend: gemini | bedrock
+    GEMINI_API_KEY=...                 # gemini backend (optional; degrades)
+    KRONAGENT_BEDROCK_MODEL=...        # bedrock backend, default anthropic.claude-opus-5-5
 
 The auto-execute allowlist is NOT an env var — it's an audited, persisted
 store. Empty until an operator runs `promote.py add <action_class>`. See
@@ -53,7 +55,7 @@ from kronagent.ingestion import (
     SqsFindingSource,
 )
 from kronagent.intel import ThreatIntelAgent
-from kronagent.llm import GeminiTriageClient, LLMUnavailableError
+from kronagent.llm import LLMUnavailableError, TriageLLM, build_triage_client
 from kronagent.orchestrator import Orchestrator, _log
 from kronagent.policy import PolicyEngine
 from kronagent.providers import NORMALIZERS, build_containment_adapters
@@ -90,8 +92,9 @@ async def main(replay: list[tuple[str, str]]) -> int:
 
     # Triage LLM is optional — the pipeline degrades to deterministic triage.
     try:
-        llm: GeminiTriageClient | None = GeminiTriageClient()
-        llm_status = "Gemini triage enabled"
+        llm: TriageLLM | None
+        llm, model = build_triage_client()
+        llm_status = f"model triage enabled ({model})"
     except LLMUnavailableError as exc:
         llm = None
         llm_status = f"LLM disabled ({exc}) — deterministic triage only"

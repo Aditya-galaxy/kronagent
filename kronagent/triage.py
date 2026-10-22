@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from .llm import GeminiTriageClient
+from .llm import TriageLLM
 from .model import Finding
 from .providers import plan_actions
 from .schemas import ProposedAction, TriageVerdict
@@ -154,7 +154,7 @@ SYSTEM_PROMPT = _SYSTEM + _UNTRUSTED_TEXT_RULE
 
 
 class TriageEngine:
-    def __init__(self, llm: GeminiTriageClient | None, signer: Signer | None = None,
+    def __init__(self, llm: TriageLLM | None, signer: Signer | None = None,
                  recheck_band: tuple[float, float] = (0.0, 10.01)) -> None:
         self._llm = llm
         self._signer = signer

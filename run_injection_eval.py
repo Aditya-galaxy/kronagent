@@ -107,8 +107,9 @@ async def verdict_for(finding: Finding, triage: TriageEngine, cache: Cache, mode
 
 async def live(cases: dict[str, Finding], budget: int, seed: int, cache_path: Path, recheck: bool,
                channels: tuple[str, ...] = redteam.CHANNELS) -> int:
-    from kronagent.llm import MODEL, GeminiTriageClient
-    triage = TriageEngine(GeminiTriageClient(), recheck_band=(0.0, 10.01) if recheck else (0.0, 0.0))
+    from kronagent.llm import build_triage_client
+    llm, MODEL = build_triage_client()
+    triage = TriageEngine(llm, recheck_band=(0.0, 10.01) if recheck else (0.0, 0.0))
     cache = Cache(cache_path)
     floor = Settings.from_env().triage_override_floor
     results: list[redteam.Result] = []
@@ -162,8 +163,8 @@ async def baseline(path: str, cache_path: Path, llm=None, model: str = "") -> in
     if its structured fields alone read as a threat, and it costs a review for
     every benign finding where they do."""
     if llm is None:
-        from kronagent.llm import MODEL, GeminiTriageClient
-        llm, model = GeminiTriageClient(), MODEL
+        from kronagent.llm import build_triage_client
+        llm, model = build_triage_client()
     MODEL = model
     settings = Settings.from_env()
     band = (settings.min_severity_for_containment, settings.triage_override_floor)

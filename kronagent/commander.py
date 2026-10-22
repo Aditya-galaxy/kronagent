@@ -53,7 +53,7 @@ from pydantic import BaseModel, Field
 
 from .correlation import CorrelationAssessment
 from .intel import ThreatIntelAssessment
-from .llm import GeminiTriageClient, LLMUnavailableError
+from .llm import LLMUnavailableError, TriageLLM
 from .model import Finding
 from .sanitization import opaque_ref
 from .schemas import TriageVerdict
@@ -206,7 +206,7 @@ def _fmt_correlation(corr: CorrelationAssessment, mask_ctx=None) -> str:
 
 
 class IncidentCommanderAgent:
-    def __init__(self, llm: GeminiTriageClient | None) -> None:
+    def __init__(self, llm: TriageLLM | None) -> None:
         self._llm = llm
 
     async def assess(

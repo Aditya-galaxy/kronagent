@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from .llm import GeminiTriageClient, LLMUnavailableError
+from .llm import LLMUnavailableError, TriageLLM
 from .model import Finding
 
 _SYSTEM = (
@@ -134,7 +134,7 @@ class _LLMIntelOutput(BaseModel):
 
 
 class ThreatIntelAgent:
-    def __init__(self, llm: GeminiTriageClient | None, stix_db: StixFeedDb | None = None) -> None:
+    def __init__(self, llm: TriageLLM | None, stix_db: StixFeedDb | None = None) -> None:
         self._llm = llm
         self._stix_db = stix_db if stix_db is not None else StixFeedDb()
 
