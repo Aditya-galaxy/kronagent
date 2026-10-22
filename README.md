@@ -276,6 +276,10 @@ graph TD
 
 ## Getting started
 
+> **Running it for real?** [`docs/deploy-aws.md`](docs/deploy-aws.md) puts
+> Kronagent inside your own AWS account with one CloudFormation stack: GuardDuty
+> in, approvals in Slack, no inbound ports, read-only until you decide otherwise.
+
 Three steps, in order. Each one is useful on its own, and nothing you do in
 step 1 or 2 can touch your infrastructure.
 
@@ -684,6 +688,8 @@ Fully offline, deterministic unit and integration tests. Coverage highlights: th
 
 - [`docs/use-cases.md`](docs/use-cases.md) — three findings end to end: what responding by hand looks like, what Kronagent does, and where it stops and waits for you
 - [`agent-team-architecture.md`](agent-team-architecture.md) — why each agent is (or isn't) an LLM, and the safety envelope every agent operates inside
+- [`docs/deploy-aws.md`](docs/deploy-aws.md) — run Kronagent inside your own AWS account: one stack, Slack approvals, no inbound ports
+- [`deploy/slack/README.md`](deploy/slack/README.md) — the Slack app for approvals, in five steps
 - [`deploy/README.md`](deploy/README.md) — IAM policy, EventBridge/SQS wiring for a real AWS deployment
 - [`testbed/README.md`](testbed/README.md) — local SQS emulation, and why moto over LocalStack
 - [`SECURITY.md`](SECURITY.md) — vulnerability reporting
