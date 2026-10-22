@@ -14,6 +14,8 @@ from __future__ import annotations
 import hmac
 import hashlib
 import json
+import time
+import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
@@ -21,19 +23,28 @@ from .config import Settings
 from .approvals import ApprovalRequest
 
 
+SIGNATURE_MAX_AGE_SECONDS = 300   # Slack's guidance: reject requests older than five minutes
+
+
 def verify_slack_signature(
     signing_secret: str,
     request_body: bytes,
     timestamp: str,
-    signature: str
+    signature: str,
+    *,
+    now: Optional[float] = None,
 ) -> bool:
     """
     Verify the HMAC-SHA256 signature of incoming Slack interactive payloads
-    to prevent spoofing.
+    to prevent spoofing, and refuse a timestamp outside the five-minute window
+    so a captured request can't be replayed later.
     """
     if not signing_secret or not signature or not timestamp:
         return False
     try:
+        current = time.time() if now is None else now
+        if abs(current - int(timestamp)) > SIGNATURE_MAX_AGE_SECONDS:
+            return False
         # Slack protocol: v0:timestamp:body
         sig_basestring = b"v0:" + timestamp.encode("utf-8") + b":" + request_body
         computed = "v0=" + hmac.new(
@@ -303,4 +314,28 @@ class ChatOpsNotifier:
                 return bool(res_body.get("ok"))
         except Exception as e:
             print(f"[-] Failed to update Slack notification: {e}")
+        return False
+
+
+def respond(response_url: str, body: dict[str, Any]) -> bool:
+    """Deliver a reply to an interaction through its `response_url`.
+
+    Slack ignores what an interactivity endpoint returns for a button click,
+    and Socket Mode's acknowledgement carries nothing back to the message
+    either, so this is how a click updates the card it came from. The URL comes
+    from the payload, so it is held to Slack's own hook host: an interaction
+    must never make Kronagent POST somewhere else.
+    """
+    parsed = urllib.parse.urlparse(response_url or "")
+    if parsed.scheme != "https" or parsed.hostname != "hooks.slack.com":
+        return False
+    try:
+        # noqa justified: scheme and host are checked above
+        req = urllib.request.Request(  # noqa: S310
+            response_url, data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as response:  # noqa: S310
+            return 200 <= response.status < 300
+    except Exception as e:  # noqa: BLE001 - a lost reply must not fail the decision
+        print(f"[-] Failed to deliver Slack reply: {e}")
         return False

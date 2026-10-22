@@ -35,7 +35,9 @@ gcp = ["google-cloud-compute>=1.19", "google-cloud-securitycenter>=1.31"]
 # Claude in Amazon Bedrock for triage (KRONAGENT_LLM=bedrock), so findings stay in the
 # customer's AWS account.
 bedrock = ["anthropic[bedrock]>=0.117"]
-all = ["kronagent[aws,k8s,azure,gcp,bedrock]"]
+# Slack approvals over Socket Mode (KRONAGENT_SLACK_APP_TOKEN): no inbound endpoint.
+slack = ["websockets>=13"]
+all = ["kronagent[aws,k8s,azure,gcp,bedrock,slack]"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6", "httpx>=0.27", "import-linter>=2.0"]
 # moto is kept OUT of `dev` on purpose: it depends on boto3, so installing it
 # alongside the core package silently reintroduces the AWS SDK and defeats the

@@ -102,3 +102,37 @@ def test_live_source_detection(monkeypatch, tmp_path) -> None:
     assert run_slice.live_source_configured(Settings.from_env()) is False
     monkeypatch.setenv("KRONAGENT_SQS_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/1/q")
     assert run_slice.live_source_configured(Settings.from_env()) is True
+
+
+async def test_socket_mode_starts_with_an_app_token_and_stops_on_shutdown(harness, monkeypatch) -> None:
+    from kronagent import slack_socket
+    state, use = harness
+    use(_forever, live=True)
+    seen = {}
+
+    class FakeSocketMode:
+        def __init__(self, token, handler):
+            seen["token"], seen["handler"] = token, handler
+
+        async def run(self, stop):
+            seen["running"] = True
+            await stop.wait()
+            seen["stopped"] = True
+
+    monkeypatch.setattr(slack_socket, "SlackSocketMode", FakeSocketMode)
+    monkeypatch.setenv("KRONAGENT_SLACK_APP_TOKEN", "xapp-1-test")
+    _sigterm_soon()
+    assert await run_serve.serve("127.0.0.1", 0, replay=False) == 0
+    from kronagent import web
+    assert seen == {"token": "xapp-1-test", "handler": web.handle_slack_action,
+                    "running": True, "stopped": True}
+
+
+async def test_without_an_app_token_socket_mode_stays_off(harness, monkeypatch) -> None:
+    from kronagent import slack_socket
+    _, use = harness
+    use(_forever, live=True)
+    monkeypatch.delenv("KRONAGENT_SLACK_APP_TOKEN", raising=False)
+    monkeypatch.setattr(slack_socket, "SlackSocketMode", lambda *a: pytest.fail("started"))
+    _sigterm_soon()
+    assert await run_serve.serve("127.0.0.1", 0, replay=False) == 0

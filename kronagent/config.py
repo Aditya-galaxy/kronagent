@@ -229,6 +229,9 @@ class Settings:
     # --- ChatOps (Slack / Teams) ---
     slack_bot_token: str = ""
     slack_signing_secret: str = ""
+    # App-level token (xapp-…) for Socket Mode: approvals arrive over an
+    # outbound WebSocket, so no public interactivity endpoint is needed.
+    slack_app_token: str = ""
     slack_channel_id: str = ""
     slack_user_mapping: dict[str, str] = field(default_factory=dict)
 
@@ -305,6 +308,7 @@ class Settings:
             oidc_roles_claim=os.getenv("KRONAGENT_OIDC_ROLES_CLAIM", "roles"),
             slack_bot_token=os.getenv("KRONAGENT_SLACK_BOT_TOKEN", ""),
             slack_signing_secret=os.getenv("KRONAGENT_SLACK_SIGNING_SECRET", ""),
+            slack_app_token=os.getenv("KRONAGENT_SLACK_APP_TOKEN", ""),
             slack_channel_id=os.getenv("KRONAGENT_SLACK_CHANNEL_ID", ""),
             slack_user_mapping=slack_user_mapping,
         )

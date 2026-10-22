@@ -7,6 +7,7 @@ from __future__ import annotations
 import hmac
 import hashlib
 import json
+import time
 import os
 import tempfile
 import urllib.parse
@@ -79,7 +80,7 @@ def test_env():
 def test_signature_verification() -> None:
     secret = "my_secret"
     body = b"payload=%7B%22type%22%3A%22block_actions%22%7D"
-    timestamp = "123456789"
+    timestamp = str(int(time.time()))
     
     basestring = b"v0:" + timestamp.encode("utf-8") + b":" + body
     computed = "v0=" + hmac.new(secret.encode("utf-8"), basestring, hashlib.sha256).hexdigest()
@@ -177,7 +178,7 @@ async def test_webhook_approve_success(test_env) -> None:
     }
 
     body = f"payload={urllib.parse.quote(json.dumps(payload))}"
-    timestamp = "123456789"
+    timestamp = str(int(time.time()))
     basestring = b"v0:" + timestamp.encode("utf-8") + b":" + body.encode("utf-8")
     signature = "v0=" + hmac.new(settings.slack_signing_secret.encode("utf-8"), basestring, hashlib.sha256).hexdigest()
 
@@ -236,7 +237,7 @@ async def test_webhook_deny_success(test_env) -> None:
     }
 
     body = f"payload={urllib.parse.quote(json.dumps(payload))}"
-    timestamp = "123456789"
+    timestamp = str(int(time.time()))
     basestring = b"v0:" + timestamp.encode("utf-8") + b":" + body.encode("utf-8")
     signature = "v0=" + hmac.new(settings.slack_signing_secret.encode("utf-8"), basestring, hashlib.sha256).hexdigest()
 
@@ -331,3 +332,36 @@ def test_expiry_warning_send_is_a_noop_without_slack_configured() -> None:
     from kronagent.config import Settings
     assert ChatOpsNotifier.send_expiry_warning(
         Settings(), _expiring_entry(), remaining="9d") is False
+
+
+def test_a_stale_signature_is_refused() -> None:
+    """A correctly signed request older than five minutes is a replay."""
+    secret, body = "my_secret", b"payload=x"
+    timestamp = "1700000000"
+    basestring = b"v0:" + timestamp.encode("utf-8") + b":" + body
+    computed = "v0=" + hmac.new(secret.encode("utf-8"), basestring, hashlib.sha256).hexdigest()
+    assert verify_slack_signature(secret, body, timestamp, computed, now=1700000000 + 299) is True
+    assert verify_slack_signature(secret, body, timestamp, computed, now=1700000000 + 301) is False
+    assert verify_slack_signature(secret, body, timestamp, computed, now=1700000000 - 301) is False
+    assert verify_slack_signature(secret, body, "not-a-number", computed) is False
+
+
+def test_respond_only_posts_to_slack_hooks(monkeypatch) -> None:
+    """The reply URL comes from the payload; it must never point Kronagent elsewhere."""
+    from kronagent import chatops
+    sent: list[str] = []
+
+    class _Resp:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(chatops.urllib.request, "urlopen",
+                        lambda req, timeout: sent.append(req.full_url) or _Resp())
+    assert chatops.respond("https://hooks.slack.com/actions/T1/1/abc", {"text": "ok"}) is True
+    for bad in ("http://hooks.slack.com/actions/x", "https://hooks.slack.com.evil.example/x",
+                "https://169.254.169.254/latest/meta-data", "file:///etc/passwd", ""):
+        assert chatops.respond(bad, {"text": "x"}) is False
+    assert sent == ["https://hooks.slack.com/actions/T1/1/abc"]

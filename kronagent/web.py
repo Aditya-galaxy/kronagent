@@ -925,6 +925,22 @@ async def slack_interactive(request: Request) -> dict[str, Any]:
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Malformed interactive JSON payload.")
 
+    result = await handle_slack_action(payload)
+    # Slack does not read this response body for a button click; the card is
+    # updated through the payload's response_url. The body is kept for clients
+    # and tests that do read it.
+    if payload.get("response_url"):
+        import asyncio
+        from .chatops import respond
+        asyncio.get_running_loop().run_in_executor(None, respond, payload["response_url"], result)
+    return result
+
+
+async def handle_slack_action(payload: dict[str, Any]) -> dict[str, Any]:
+    """Decide one Slack button click. Shared by the HTTP route above, which has
+    verified Slack's signature, and by Socket Mode (slack_socket.py), whose
+    payloads arrive over a connection only Slack can open. Returns the reply
+    for the card the click came from."""
     # 3. Extract operator details
     slack_user_id = payload.get("user", {}).get("id", "")
     slack_username = payload.get("user", {}).get("name", "") or payload.get("user", {}).get("username", "unknown")
@@ -975,7 +991,8 @@ async def slack_interactive(request: Request) -> dict[str, Any]:
     # 5. Extract action decision
     actions = payload.get("actions", [])
     if not actions:
-        raise HTTPException(status_code=400, detail="No action element found.")
+        return {"response_type": "ephemeral", "replace_original": False,
+                "text": "❌ No action element found in the interaction."}
 
     action_element = actions[0]
     action_id = action_element.get("action_id")

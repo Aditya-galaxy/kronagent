@@ -37,6 +37,7 @@ _SECTION_TITLES = {
     "identity": "Operator identity",
     "governance": "Earn-trust governance",
     "agents": "Agents & backstops",
+    "chatops": "Approvals in Slack",
 }
 
 
