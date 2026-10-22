@@ -168,7 +168,10 @@ def test_every_declared_parameter_is_referenced():
 
 
 def test_committed_templates_are_valid_json_with_one_role_each():
-    for path in sorted((REPO / "deploy" / "cloudformation").glob("*.json")):
+    # The cross-account role templates only. The in-account stack runs
+    # Kronagent itself and has two roles by design; tests/test_aws_stack.py
+    # holds its own guarantees.
+    for path in sorted((REPO / "deploy" / "cloudformation").glob("kronagent-*-role.json")):
         doc = json.loads(path.read_text(encoding="utf-8"))
         assert doc["AWSTemplateFormatVersion"] == "2010-09-09"
         roles = [r for r in doc["Resources"].values()

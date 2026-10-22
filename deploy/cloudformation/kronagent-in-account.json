@@ -1,0 +1,1129 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Kronagent inside your AWS account: triages GuardDuty findings with Claude on Bedrock, plans containment, and asks in Slack before acting. Read-only by default. No inbound ports.",
+  "Parameters": {
+    "EnableContainment": {
+      "Type": "String",
+      "AllowedValues": [
+        "false",
+        "true"
+      ],
+      "Default": "false",
+      "Description": "false: Kronagent can read and plan, and is unable to change anything (no write permissions, dry-run). true: attaches the least-privilege contain policy and turns dry-run off. Every action still needs an approval in Slack or an allowlist promotion."
+    },
+    "QuarantineSecurityGroupId": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^(sg-[0-9a-f]+)?$",
+      "Description": "Required when EnableContainment=true: the deny-all security group instances are isolated into. Kronagent can move an instance into this group and no other."
+    },
+    "QuarantineNaclId": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^(acl-[0-9a-f]+)?$",
+      "Description": "Required when EnableContainment=true: the network ACL Kronagent may add deny entries to. It can modify no other NACL."
+    },
+    "BedrockModel": {
+      "Type": "String",
+      "Default": "anthropic.claude-opus-5-5",
+      "Description": "Claude model for triage, via Amazon Bedrock in this account. Enable access to it in the Bedrock console first. anthropic.claude-haiku-5-5 costs less."
+    },
+    "SlackAppToken": {
+      "Type": "String",
+      "Default": "",
+      "NoEcho": true,
+      "AllowedPattern": "^(xapp-[A-Za-z0-9-]+)?$",
+      "Description": "Slack app-level token (xapp-...) for Socket Mode approvals. Stored in Secrets Manager. Leave empty to run without Slack."
+    },
+    "SlackBotToken": {
+      "Type": "String",
+      "Default": "",
+      "NoEcho": true,
+      "AllowedPattern": "^(xoxb-[A-Za-z0-9-]+)?$",
+      "Description": "Slack bot token (xoxb-...) that posts approval cards. Stored in Secrets Manager."
+    },
+    "SlackChannelId": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^([A-Z0-9]+)?$",
+      "Description": "Channel the approval cards are posted to, e.g. C0123456789."
+    },
+    "SlackUserMapping": {
+      "Type": "String",
+      "Default": "{}",
+      "Description": "JSON mapping Slack user IDs to Kronagent operator IDs, e.g. {\"U0123ABC\": \"alice\"}. A click is accepted only from a mapped operator in the registry on the state volume."
+    },
+    "ImageUri": {
+      "Type": "String",
+      "Default": "ghcr.io/aditya-galaxy/kronagent:0.2.0",
+      "Description": "Kronagent container image. Pin a version."
+    },
+    "LogRetentionDays": {
+      "Type": "Number",
+      "Default": 30,
+      "AllowedValues": [
+        7,
+        14,
+        30,
+        60,
+        90,
+        180,
+        365
+      ],
+      "Description": "How long CloudWatch keeps the task's logs."
+    }
+  },
+  "Rules": {
+    "ContainmentNeedsQuarantineResources": {
+      "RuleCondition": {
+        "Fn::Equals": [
+          {
+            "Ref": "EnableContainment"
+          },
+          "true"
+        ]
+      },
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "QuarantineSecurityGroupId"
+                  },
+                  ""
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "EnableContainment=true needs QuarantineSecurityGroupId."
+        },
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "QuarantineNaclId"
+                  },
+                  ""
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "EnableContainment=true needs QuarantineNaclId."
+        }
+      ]
+    },
+    "SocketModeNeedsABotAndAChannel": {
+      "RuleCondition": {
+        "Fn::Not": [
+          {
+            "Fn::Equals": [
+              {
+                "Ref": "SlackAppToken"
+              },
+              ""
+            ]
+          }
+        ]
+      },
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "SlackBotToken"
+                  },
+                  ""
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "SlackAppToken needs SlackBotToken, or no card is ever posted."
+        },
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "SlackChannelId"
+                  },
+                  ""
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "SlackAppToken needs SlackChannelId."
+        }
+      ]
+    }
+  },
+  "Conditions": {
+    "ContainmentEnabled": {
+      "Fn::Equals": [
+        {
+          "Ref": "EnableContainment"
+        },
+        "true"
+      ]
+    },
+    "HasSlack": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "SlackAppToken"
+            },
+            ""
+          ]
+        }
+      ]
+    }
+  },
+  "Resources": {
+    "Vpc": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "CidrBlock": "10.80.0.0/16",
+        "EnableDnsHostnames": true,
+        "EnableDnsSupport": true,
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "kronagent"
+          }
+        ]
+      }
+    },
+    "InternetGateway": {
+      "Type": "AWS::EC2::InternetGateway"
+    },
+    "GatewayAttachment": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "InternetGatewayId": {
+          "Ref": "InternetGateway"
+        }
+      }
+    },
+    "PublicRouteTable": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        }
+      }
+    },
+    "PublicRoute": {
+      "Type": "AWS::EC2::Route",
+      "DependsOn": "GatewayAttachment",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PublicRouteTable"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "InternetGateway"
+        }
+      }
+    },
+    "SubnetA": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "CidrBlock": {
+          "Fn::Select": [
+            0,
+            {
+              "Fn::Cidr": [
+                "10.80.0.0/16",
+                2,
+                8
+              ]
+            }
+          ]
+        },
+        "AvailabilityZone": {
+          "Fn::Select": [
+            0,
+            {
+              "Fn::GetAZs": ""
+            }
+          ]
+        },
+        "MapPublicIpOnLaunch": false
+      }
+    },
+    "SubnetB": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "CidrBlock": {
+          "Fn::Select": [
+            1,
+            {
+              "Fn::Cidr": [
+                "10.80.0.0/16",
+                2,
+                8
+              ]
+            }
+          ]
+        },
+        "AvailabilityZone": {
+          "Fn::Select": [
+            1,
+            {
+              "Fn::GetAZs": ""
+            }
+          ]
+        },
+        "MapPublicIpOnLaunch": false
+      }
+    },
+    "SubnetARoutes": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": {
+          "Ref": "SubnetA"
+        },
+        "RouteTableId": {
+          "Ref": "PublicRouteTable"
+        }
+      }
+    },
+    "SubnetBRoutes": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": {
+          "Ref": "SubnetB"
+        },
+        "RouteTableId": {
+          "Ref": "PublicRouteTable"
+        }
+      }
+    },
+    "TaskSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Kronagent task: no inbound rules at all; outbound HTTPS to AWS and Slack",
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": "0.0.0.0/0",
+            "Description": "AWS APIs, Bedrock, Slack, image pulls, EFS"
+          }
+        ]
+      }
+    },
+    "StateSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Kronagent state volume: NFS from the Kronagent task only",
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 2049,
+            "ToPort": 2049,
+            "SourceSecurityGroupId": {
+              "Ref": "TaskSecurityGroup"
+            },
+            "Description": "NFS from the Kronagent task"
+          }
+        ]
+      }
+    },
+    "StateFileSystem": {
+      "Type": "AWS::EFS::FileSystem",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Encrypted": true,
+        "BackupPolicy": {
+          "Status": "ENABLED"
+        },
+        "FileSystemTags": [
+          {
+            "Key": "Name",
+            "Value": "kronagent-state"
+          }
+        ]
+      }
+    },
+    "StateMountTargetA": {
+      "Type": "AWS::EFS::MountTarget",
+      "Properties": {
+        "FileSystemId": {
+          "Ref": "StateFileSystem"
+        },
+        "SubnetId": {
+          "Ref": "SubnetA"
+        },
+        "SecurityGroups": [
+          {
+            "Ref": "StateSecurityGroup"
+          }
+        ]
+      }
+    },
+    "StateMountTargetB": {
+      "Type": "AWS::EFS::MountTarget",
+      "Properties": {
+        "FileSystemId": {
+          "Ref": "StateFileSystem"
+        },
+        "SubnetId": {
+          "Ref": "SubnetB"
+        },
+        "SecurityGroups": [
+          {
+            "Ref": "StateSecurityGroup"
+          }
+        ]
+      }
+    },
+    "StateAccessPoint": {
+      "Type": "AWS::EFS::AccessPoint",
+      "Properties": {
+        "FileSystemId": {
+          "Ref": "StateFileSystem"
+        },
+        "PosixUser": {
+          "Uid": "10001",
+          "Gid": "10001"
+        },
+        "RootDirectory": {
+          "Path": "/kronagent",
+          "CreationInfo": {
+            "OwnerUid": "10001",
+            "OwnerGid": "10001",
+            "Permissions": "0700"
+          }
+        }
+      }
+    },
+    "FindingsDeadLetterQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true
+      }
+    },
+    "FindingsQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "MessageRetentionPeriod": 345600,
+        "VisibilityTimeout": 300,
+        "SqsManagedSseEnabled": true,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "FindingsDeadLetterQueue",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 5
+        }
+      }
+    },
+    "FindingsRule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Description": "Every GuardDuty finding in this region, to Kronagent",
+        "EventPattern": {
+          "source": [
+            "aws.guardduty"
+          ],
+          "detail-type": [
+            "GuardDuty Finding"
+          ]
+        },
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "FindingsQueue",
+                "Arn"
+              ]
+            },
+            "Id": "kronagent"
+          }
+        ]
+      }
+    },
+    "FindingsQueuePolicy": {
+      "Type": "AWS::SQS::QueuePolicy",
+      "Properties": {
+        "Queues": [
+          {
+            "Ref": "FindingsQueue"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "OnlyTheGuardDutyRuleMaySend",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "events.amazonaws.com"
+              },
+              "Action": "sqs:SendMessage",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "FindingsQueue",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "ArnEquals": {
+                  "aws:SourceArn": {
+                    "Fn::GetAtt": [
+                      "FindingsRule",
+                      "Arn"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "SlackSecret": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Condition": "HasSlack",
+      "Properties": {
+        "Description": "Kronagent's Slack tokens (Socket Mode app token and bot token)",
+        "SecretString": {
+          "Fn::Sub": "{\"app_token\":\"${SlackAppToken}\",\"bot_token\":\"${SlackBotToken}\"}"
+        }
+      }
+    },
+    "LogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "RetentionInDays": {
+          "Ref": "LogRetentionDays"
+        }
+      }
+    },
+    "Cluster": {
+      "Type": "AWS::ECS::Cluster",
+      "Properties": {
+        "ClusterSettings": [
+          {
+            "Name": "containerInsights",
+            "Value": "disabled"
+          }
+        ]
+      }
+    },
+    "ExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "Description": "Pulls the image, writes logs, reads the Slack secret",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Fn::Sub": "${AWS::AccountId}"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+          }
+        ],
+        "Policies": {
+          "Fn::If": [
+            "HasSlack",
+            [
+              {
+                "PolicyName": "ReadSlackSecret",
+                "PolicyDocument": {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Effect": "Allow",
+                      "Action": "secretsmanager:GetSecretValue",
+                      "Resource": {
+                        "Ref": "SlackSecret"
+                      }
+                    }
+                  ]
+                }
+              }
+            ],
+            {
+              "Ref": "AWS::NoValue"
+            }
+          ]
+        }
+      }
+    },
+    "TaskRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "Description": "Kronagent itself: read-only unless EnableContainment=true",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Fn::Sub": "${AWS::AccountId}"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "KronagentObservePolicy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ReadGuardDutyFindings",
+                  "Effect": "Allow",
+                  "Action": [
+                    "guardduty:GetFindings",
+                    "guardduty:ListFindings",
+                    "guardduty:ListDetectors",
+                    "guardduty:GetDetector"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "DescribeImplicatedResources",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:DescribeInstances",
+                    "ec2:DescribeSecurityGroups",
+                    "ec2:DescribeNetworkAcls",
+                    "ec2:DescribeVpcs"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "DescribeImplicatedPrincipals",
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:GetUser",
+                    "iam:ListAccessKeys",
+                    "iam:GetRole",
+                    "iam:ListAttachedUserPolicies"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "ConfirmOwnIdentity",
+                  "Effect": "Allow",
+                  "Action": "sts:GetCallerIdentity",
+                  "Resource": "*"
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "KronagentIngestion",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ReceiveAndDeleteFindingsQueueOnly",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${FindingsQueue.Arn}"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "KronagentTriageModel",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "InvokeClaudeInBedrock",
+                  "Effect": "Allow",
+                  "Action": "bedrock-mantle:CreateInference",
+                  "Resource": "*"
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "KronagentStateVolume",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "MountStateThroughItsAccessPointOnly",
+                  "Effect": "Allow",
+                  "Action": [
+                    "elasticfilesystem:ClientMount",
+                    "elasticfilesystem:ClientWrite"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${StateFileSystem.Arn}"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "elasticfilesystem:AccessPointArn": {
+                        "Fn::Sub": "${StateAccessPoint.Arn}"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "KronagentEcsExec",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "EcsExecSessionChannels",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ssmmessages:CreateControlChannel",
+                    "ssmmessages:CreateDataChannel",
+                    "ssmmessages:OpenControlChannel",
+                    "ssmmessages:OpenDataChannel"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ContainPolicy": {
+      "Type": "AWS::IAM::RolePolicy",
+      "Condition": "ContainmentEnabled",
+      "Properties": {
+        "PolicyName": "KronagentContainPolicy",
+        "RoleName": {
+          "Ref": "TaskRole"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "ConfirmOwnIdentity",
+              "Effect": "Allow",
+              "Action": "sts:GetCallerIdentity",
+              "Resource": "*"
+            },
+            {
+              "Sid": "DisableAndReenableAccessKeys",
+              "Effect": "Allow",
+              "Action": "iam:UpdateAccessKey",
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/*"
+              }
+            },
+            {
+              "Sid": "QuarantineDenyAllInlinePolicyOnly",
+              "Effect": "Allow",
+              "Action": [
+                "iam:PutUserPolicy",
+                "iam:DeleteUserPolicy"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/*"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "iam:PolicyName": "kronagent-quarantine-deny-all"
+                }
+              }
+            },
+            {
+              "Sid": "RevokeRoleSessionsInlinePolicyOnly",
+              "Effect": "Allow",
+              "Action": [
+                "iam:PutRolePolicy",
+                "iam:DeleteRolePolicy"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "iam:PolicyName": "kronagent-revoke-sessions"
+                }
+              }
+            },
+            {
+              "Sid": "ReadStateForRollbackCapture",
+              "Effect": "Allow",
+              "Action": [
+                "ec2:DescribeInstances",
+                "ec2:DescribeNetworkAcls"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "ec2:Region": {
+                    "Fn::Sub": "${AWS::Region}"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "IsolateInstanceIntoQuarantineSG",
+              "Effect": "Allow",
+              "Action": "ec2:ModifyInstanceAttribute",
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${QuarantineSecurityGroupId}"
+                }
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "ec2:Region": {
+                    "Fn::Sub": "${AWS::Region}"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "BlockIpAtQuarantineNacl",
+              "Effect": "Allow",
+              "Action": [
+                "ec2:CreateNetworkAclEntry",
+                "ec2:DeleteNetworkAclEntry"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-acl/${QuarantineNaclId}"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "ec2:Region": {
+                    "Fn::Sub": "${AWS::Region}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "TaskDefinition": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties": {
+        "Family": "kronagent",
+        "Cpu": "256",
+        "Memory": "1024",
+        "NetworkMode": "awsvpc",
+        "RequiresCompatibilities": [
+          "FARGATE"
+        ],
+        "RuntimePlatform": {
+          "CpuArchitecture": "X86_64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "ExecutionRole",
+            "Arn"
+          ]
+        },
+        "TaskRoleArn": {
+          "Fn::GetAtt": [
+            "TaskRole",
+            "Arn"
+          ]
+        },
+        "Volumes": [
+          {
+            "Name": "state",
+            "EFSVolumeConfiguration": {
+              "FilesystemId": {
+                "Ref": "StateFileSystem"
+              },
+              "TransitEncryption": "ENABLED",
+              "AuthorizationConfig": {
+                "AccessPointId": {
+                  "Ref": "StateAccessPoint"
+                },
+                "IAM": "ENABLED"
+              }
+            }
+          }
+        ],
+        "ContainerDefinitions": [
+          {
+            "Name": "kronagent",
+            "Image": {
+              "Ref": "ImageUri"
+            },
+            "Essential": true,
+            "MountPoints": [
+              {
+                "SourceVolume": "state",
+                "ContainerPath": "/var/lib/kronagent"
+              }
+            ],
+            "Environment": [
+              {
+                "Name": "AWS_REGION",
+                "Value": {
+                  "Fn::Sub": "${AWS::Region}"
+                }
+              },
+              {
+                "Name": "KRONAGENT_STATE_DIR",
+                "Value": "/var/lib/kronagent"
+              },
+              {
+                "Name": "KRONAGENT_DB_PATH",
+                "Value": "/var/lib/kronagent/kronagent.db"
+              },
+              {
+                "Name": "KRONAGENT_OPERATOR_REGISTRY",
+                "Value": "/var/lib/kronagent/kronagent_operators.json"
+              },
+              {
+                "Name": "KRONAGENT_SQS_QUEUE_URL",
+                "Value": {
+                  "Fn::Sub": "${FindingsQueue}"
+                }
+              },
+              {
+                "Name": "KRONAGENT_LLM",
+                "Value": "bedrock"
+              },
+              {
+                "Name": "KRONAGENT_BEDROCK_MODEL",
+                "Value": {
+                  "Ref": "BedrockModel"
+                }
+              },
+              {
+                "Name": "KRONAGENT_QUARANTINE_SG_ID",
+                "Value": {
+                  "Ref": "QuarantineSecurityGroupId"
+                }
+              },
+              {
+                "Name": "KRONAGENT_QUARANTINE_NACL_ID",
+                "Value": {
+                  "Ref": "QuarantineNaclId"
+                }
+              },
+              {
+                "Name": "KRONAGENT_SLACK_CHANNEL_ID",
+                "Value": {
+                  "Ref": "SlackChannelId"
+                }
+              },
+              {
+                "Name": "KRONAGENT_SLACK_USER_MAPPING",
+                "Value": {
+                  "Ref": "SlackUserMapping"
+                }
+              },
+              {
+                "Name": "KRONAGENT_DRY_RUN",
+                "Value": {
+                  "Fn::If": [
+                    "ContainmentEnabled",
+                    "false",
+                    "true"
+                  ]
+                }
+              }
+            ],
+            "Secrets": {
+              "Fn::If": [
+                "HasSlack",
+                [
+                  {
+                    "Name": "KRONAGENT_SLACK_APP_TOKEN",
+                    "ValueFrom": {
+                      "Fn::Sub": "${SlackSecret}:app_token::"
+                    }
+                  },
+                  {
+                    "Name": "KRONAGENT_SLACK_BOT_TOKEN",
+                    "ValueFrom": {
+                      "Fn::Sub": "${SlackSecret}:bot_token::"
+                    }
+                  }
+                ],
+                {
+                  "Ref": "AWS::NoValue"
+                }
+              ]
+            },
+            "HealthCheck": {
+              "Command": [
+                "CMD",
+                "python",
+                "-c",
+                "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/status', timeout=4).status==200 else 1)"
+              ],
+              "Interval": 30,
+              "Timeout": 5,
+              "Retries": 3,
+              "StartPeriod": 30
+            },
+            "LinuxParameters": {
+              "InitProcessEnabled": true
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "LogGroup"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "kronagent"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "Service": {
+      "Type": "AWS::ECS::Service",
+      "DependsOn": [
+        "PublicRoute",
+        "StateMountTargetA",
+        "StateMountTargetB"
+      ],
+      "Properties": {
+        "Cluster": {
+          "Ref": "Cluster"
+        },
+        "TaskDefinition": {
+          "Ref": "TaskDefinition"
+        },
+        "DesiredCount": 1,
+        "LaunchType": "FARGATE",
+        "EnableExecuteCommand": true,
+        "DeploymentConfiguration": {
+          "MaximumPercent": 100,
+          "MinimumHealthyPercent": 0,
+          "DeploymentCircuitBreaker": {
+            "Enable": true,
+            "Rollback": true
+          }
+        },
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "ENABLED",
+            "SecurityGroups": [
+              {
+                "Ref": "TaskSecurityGroup"
+              }
+            ],
+            "Subnets": [
+              {
+                "Ref": "SubnetA"
+              },
+              {
+                "Ref": "SubnetB"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "ClusterName": {
+      "Description": "ECS cluster running Kronagent",
+      "Value": {
+        "Ref": "Cluster"
+      }
+    },
+    "ServiceName": {
+      "Description": "ECS service",
+      "Value": {
+        "Fn::GetAtt": [
+          "Service",
+          "Name"
+        ]
+      }
+    },
+    "FindingsQueueUrl": {
+      "Description": "Where GuardDuty findings queue for Kronagent",
+      "Value": {
+        "Ref": "FindingsQueue"
+      }
+    },
+    "LogGroupName": {
+      "Description": "Kronagent's logs",
+      "Value": {
+        "Ref": "LogGroup"
+      }
+    },
+    "StateFileSystemId": {
+      "Description": "EFS holding the audit log and state (retained on delete)",
+      "Value": {
+        "Ref": "StateFileSystem"
+      }
+    },
+    "ContainmentEnabled": {
+      "Description": "Whether Kronagent holds write permissions",
+      "Value": {
+        "Ref": "EnableContainment"
+      }
+    }
+  }
+}
