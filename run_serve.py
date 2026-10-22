@@ -20,6 +20,10 @@ connections, then KRONAGENT_SQS_QUEUE_URL). With neither configured, the
 pipeline does not start unless --replay is given: a deployment that silently
 replayed sample findings would fill a real audit log with fiction.
 
+With KRONAGENT_SLACK_APP_TOKEN set, Slack approvals arrive over an outbound
+Socket Mode connection (kronagent/slack_socket.py) instead of the public
+/api/slack/interactive route, so the deployment needs no inbound port.
+
 Exit codes: 0 after a clean shutdown, 1 when the pipeline crashes or a live
 source stops on its own. Either way the console goes down with it, so an
 orchestrator (ECS, Kubernetes) restarts the whole task instead of leaving a
@@ -73,8 +77,33 @@ async def serve(host: str, port: int, replay: bool) -> int:
     else:
         _log("no live source (no healthy cloud connection, no KRONAGENT_SQS_QUEUE_URL) — "
              "the agent loop is NOT running. Pass --replay to demo on the sample findings.")
+    slack_stop = asyncio.Event()
+    slack = _start_slack(settings, slack_stop)
     web = asyncio.create_task(server.serve())
+    try:
+        return await _supervise(server, web, pipeline, live)
+    finally:
+        if slack is not None:
+            slack_stop.set()
+            await slack
 
+
+def _start_slack(settings: Settings, stop: asyncio.Event) -> asyncio.Task | None:
+    if not settings.slack_app_token:
+        return None
+    from kronagent import web as console
+    from kronagent.slack_socket import SlackSocketMode, SocketModeError
+    try:
+        client = SlackSocketMode(settings.slack_app_token, console.handle_slack_action)
+    except SocketModeError as exc:
+        _log(f"slack: Socket Mode NOT started ({exc})")
+        return None
+    _log("slack: Socket Mode on — approvals arrive over an outbound connection")
+    return asyncio.create_task(client.run(stop))
+
+
+async def _supervise(server: _Server, web: asyncio.Task, pipeline: asyncio.Task | None,
+                     live: bool) -> int:
     if pipeline is None:
         await web
         return 0

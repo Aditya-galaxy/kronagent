@@ -604,7 +604,7 @@ Two things belong in cron:
 0 9 * * 1   python3 promote.py review --strict        # weekly: exit 3 if anything needs a decision
 ```
 
-The warning is notice, not control: if Slack is unconfigured or the send fails, the attempt is still audited and the entry still expires on time. Everything else routes to `approve.py` regardless of `KRONAGENT_DRY_RUN`. Persistent storage can be enabled by specifying `KRONAGENT_DB_PATH` pointing to a SQLite database file, transitioning the approvals queue and correlation memory from file-based/in-memory scopes. See [`deploy/README.md`](deploy/README.md) for the AWS IAM policy and SQS/EventBridge wiring.
+The warning is notice, not control: if Slack is unconfigured or the send fails, the attempt is still audited and the entry still expires on time. Everything else routes to `approve.py` regardless of `KRONAGENT_DRY_RUN`. Persistent storage can be enabled by specifying `KRONAGENT_DB_PATH` pointing to a SQLite database file, transitioning the approvals queue and correlation memory from file-based/in-memory scopes. See [`deploy/README.md`](deploy/README.md) for the AWS IAM policy and SQS/EventBridge wiring. To take approvals in Slack without exposing an endpoint, run `kronagent-serve` with Socket Mode; [`deploy/slack/README.md`](deploy/slack/README.md) sets up the app in five steps.
 
 ---
 
@@ -638,6 +638,7 @@ kronagent/
   crypto.py            KMS/RSA signing for custody + agent non-repudiation
   ocsf.py              OCSF normalization for SIEM export
   chatops.py           Slack/Teams approval notifications
+  slack_socket.py      Slack approvals over Socket Mode (no inbound endpoint)
   compliance.py        EU AI Act compliance reporting engine
   ingestion.py         file replay + live SQS ingestion
   connect.py           tenant cloud onboarding & zero-key STS AssumeRole

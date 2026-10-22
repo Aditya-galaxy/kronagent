@@ -318,3 +318,20 @@ def test_a_bedrock_backend_names_its_model(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(llm, "BedrockTriageClient", lambda: SimpleNamespace(model="anthropic.claude-opus-5-5"))
     check = _by_name(run_preflight(_settings(tmp_path)))["llm"]
     assert check.status == "pass" and "anthropic.claude-opus-5-5" in check.detail
+
+
+@pytest.mark.parametrize("token, websockets_present, bot, expected", [
+    ("xoxb-wrong-kind", True, "xoxb-1", "fail"),
+    ("xapp-1", False, "xoxb-1", "fail"),
+    ("xapp-1", True, "", "warn"),
+    ("xapp-1", True, "xoxb-1", "pass"),
+])
+def test_socket_mode_readiness(tmp_path, monkeypatch, token, websockets_present, bot, expected) -> None:
+    from kronagent import preflight as pf
+    monkeypatch.setattr(pf, "_module_available", lambda dotted: websockets_present)
+    settings = _settings(tmp_path, slack_app_token=token, slack_bot_token=bot, slack_channel_id="C1")
+    assert _by_name(run_preflight(settings))["slack_socket_mode"].status == expected
+
+
+def test_no_socket_mode_check_without_an_app_token(tmp_path) -> None:
+    assert "slack_socket_mode" not in _by_name(run_preflight(_settings(tmp_path)))

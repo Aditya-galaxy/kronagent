@@ -474,6 +474,34 @@ def _check_governance(settings: Settings, store: AllowlistStore) -> list[Check]:
     return checks
 
 
+def _check_chatops(settings: Settings) -> list[Check]:
+    """Socket Mode is how an in-account deployment takes approvals without a
+    public endpoint; a misconfigured token means clicks silently go nowhere."""
+    if not settings.slack_app_token:
+        return []
+    if not settings.slack_app_token.startswith("xapp-"):
+        return [Check("slack_socket_mode", "fail",
+                      "KRONAGENT_SLACK_APP_TOKEN is not an app-level token (xapp-…); Socket Mode "
+                      "will not start and approval clicks will go nowhere.",
+                      fix="Create an app-level token with connections:write in the Slack app settings.",
+                      section="chatops")]
+    if not _module_available("websockets.asyncio.client"):
+        return [Check("slack_socket_mode", "fail",
+                      "KRONAGENT_SLACK_APP_TOKEN is set but the websockets package is missing.",
+                      fix='pip install "kronagent[slack]"', section="chatops")]
+    missing = [name for name, value in (("KRONAGENT_SLACK_BOT_TOKEN", settings.slack_bot_token),
+                                        ("KRONAGENT_SLACK_CHANNEL_ID", settings.slack_channel_id))
+               if not value]
+    if missing:
+        return [Check("slack_socket_mode", "warn",
+                      f"Socket Mode can receive clicks, but {', '.join(missing)} unset means no "
+                      "approval card is ever posted to click.",
+                      fix="Set the bot token and the channel the cards go to.", section="chatops")]
+    return [Check("slack_socket_mode", "pass",
+                  "Slack approvals arrive over Socket Mode; no inbound endpoint is needed.",
+                  section="chatops")]
+
+
 def _check_agents(settings: Settings) -> list[Check]:
     checks: list[Check] = []
     backend = os.getenv("KRONAGENT_LLM", "gemini").strip().lower()
@@ -552,4 +580,5 @@ def run_preflight(settings: Optional[Settings] = None) -> PreflightReport:
     report.checks.extend(_check_identity(settings))
     report.checks.extend(_check_governance(settings, store))
     report.checks.extend(_check_agents(settings))
+    report.checks.extend(_check_chatops(settings))
     return report
