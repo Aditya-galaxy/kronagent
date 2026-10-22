@@ -35,7 +35,9 @@ from kronagent.identity import ALL_TENANTS, DEFAULT_TENANT, hash_token, known_ro
 
 
 def _registry_path(args: argparse.Namespace) -> str:
-    return args.registry or Settings.from_env().operator_registry_path or "kronagent_operators.json"
+    settings = Settings.from_env()
+    return (args.registry or settings.operator_registry_path
+            or os.path.join(settings.state_dir, "kronagent_operators.json"))
 
 
 def _load(path: str) -> dict[str, dict]:

@@ -82,4 +82,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/status', timeout=4).status==200 else 1)"
 
-CMD ["uvicorn", "kronagent.web:app", "--host", "0.0.0.0", "--port", "8000"]
+# The agent loop and the console in one process (run_serve.py, installed as
+# the kronagent-serve console script). With no live source configured the loop
+# stays off and only the console serves; add --replay to demonstrate on the
+# bundled samples.
+CMD ["kronagent-serve", "--host", "0.0.0.0", "--port", "8000"]
