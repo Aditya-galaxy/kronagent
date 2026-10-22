@@ -22,12 +22,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from typing import Any, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows: in-process ordering only
+    fcntl = None  # type: ignore[assignment]
 
 from .schemas import AuditRecord
 
 _GENESIS = "0" * 64
+_TAIL_BYTES = 64 * 1024     # far larger than any one record
+
+_log = logging.getLogger(__name__)
 
 
 def _canonical(record: dict[str, Any]) -> str:
@@ -44,6 +53,31 @@ class AuditLog:
         self._path = path
         self._lock = asyncio.Lock()
         self._last_hash = self._recover_last_hash()
+
+    @staticmethod
+    def _tail_hash(fh) -> Optional[str]:
+        """The hash of the last record in a log opened in binary, read from
+        its end. None means the tail held no record (junk only)."""
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        if size == 0:
+            return _GENESIS
+        fh.seek(max(0, size - _TAIL_BYTES))
+        for line in reversed(fh.read().splitlines()):
+            try:
+                return json.loads(line)["_hash"]
+            except (json.JSONDecodeError, KeyError, TypeError, UnicodeDecodeError):
+                continue
+        return None
+
+    @staticmethod
+    def _holds(fh, entry_hash: str) -> bool:
+        """Whether a record with this hash is still in the log."""
+        if entry_hash == _GENESIS:
+            return True
+        needle = f'"_hash": "{entry_hash}"'.encode()
+        fh.seek(0)
+        return any(needle in line for line in fh)
 
     def _recover_last_hash(self) -> str:
         """Resume the chain from an existing log so restarts don't fork it."""
@@ -62,15 +96,40 @@ class AuditLog:
 
     async def record(self, entry: AuditRecord) -> str:
         """Append one entry durably; returns its chain hash."""
+        # The chain continues from the file, not from this instance's memory.
+        # The console, the agent loop and the CLIs each hold their own
+        # AuditLog on the same path; linking to a remembered hash forked the
+        # chain the moment two of them interleaved, and verify() then reported
+        # tampering that never happened. The file lock makes read-tail-then-
+        # append atomic across instances and processes.
         async with self._lock:
             record = entry.model_dump()
             canonical = _canonical(record)
-            entry_hash = _hash_entry(self._last_hash, canonical)
-            envelope = {"_prev": self._last_hash, "_hash": entry_hash, "record": record}
-            with open(self._path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(envelope) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
+            with open(self._path, "ab+") as fh:
+                if fcntl is not None:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    prev = self._tail_hash(fh)
+                    if prev is None:
+                        prev = self._recover_last_hash()
+                    # Another writer appending since our last record is
+                    # normal. Our last record being GONE is not: linking to the
+                    # new tail would quietly paper over deleted entries, so
+                    # keep linking to ours and let verify() show the gap.
+                    if prev != self._last_hash and not self._holds(fh, self._last_hash):
+                        _log.error("audit log %s no longer holds record %s that this process "
+                                   "wrote or read; the chain is left broken so verification "
+                                   "reports it", self._path, self._last_hash[:12])
+                        prev = self._last_hash
+                    entry_hash = _hash_entry(prev, canonical)
+                    envelope = {"_prev": prev, "_hash": entry_hash, "record": record}
+                    fh.seek(0, os.SEEK_END)
+                    fh.write((json.dumps(envelope) + "\n").encode("utf-8"))
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
             self._last_hash = entry_hash
             return entry_hash
 

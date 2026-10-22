@@ -224,6 +224,36 @@ jobs:
           docker rm -f kronagent-ci >/dev/null
           exit 1
 
+      - name: The agent loop runs in the image and writes to the volume
+        # The default CMD starts the loop only when a live source exists, so
+        # replay the samples here: /api/status must answer AND the audit chain
+        # must appear in the state volume, verified, in dry-run.
+        run: |
+          docker run -d --name kronagent-loop kronagent:ci \
+            kronagent-serve --host 0.0.0.0 --port 8000 --replay
+          for i in $(seq 1 60); do
+            if docker exec kronagent-loop python -c "
+          import sys
+          from kronagent.audit import AuditLog
+          from kronagent.config import Settings
+          s = Settings.from_env()
+          assert s.audit_log_path.startswith('/var/lib/kronagent/'), s.audit_log_path
+          ok, broken = AuditLog.verify(s.audit_log_path)
+          n = len(AuditLog.read_records(s.audit_log_path))
+          sys.exit(0 if ok and n > 0 else 1)
+          " 2>/dev/null; then
+              echo "audit chain written and verified after ${i}s"
+              docker exec kronagent-loop python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/api/status').read().decode())"
+              docker rm -f kronagent-loop >/dev/null
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the agent loop never wrote a verified audit chain:"
+          docker logs kronagent-loop
+          docker rm -f kronagent-loop >/dev/null
+          exit 1
+
       - name: Dry-run is the default posture
         # A container that ships with containment armed would be a defect, so
         # assert the shipped default rather than trusting the Dockerfile ENV.

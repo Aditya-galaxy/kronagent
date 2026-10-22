@@ -119,7 +119,10 @@ def get_signer(settings: Settings) -> Signer:
     if getattr(settings, "kms_key_id", ""):
         return KmsSigner(settings.kms_key_id, region=settings.aws_region)
 
-    # Resolve local pem path in the same directory as the database if configured
-    key_dir = os.path.dirname(settings.db_path) if settings.db_path else ""
+    # The local pem lives beside the database if one is configured, else in the
+    # state directory. In the working directory of a container it would be
+    # regenerated on every restart, and nothing signed before it would verify.
+    key_dir = (os.path.dirname(settings.db_path) if settings.db_path
+               else getattr(settings, "state_dir", ""))
     key_path = os.path.join(key_dir, "kronagent_key.pem") if key_dir else "kronagent_key.pem"
     return LocalAsymmetricSigner(key_path)

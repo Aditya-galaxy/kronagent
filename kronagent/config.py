@@ -187,6 +187,11 @@ class Settings:
     # kronagent.identity) to enforce authenticated, authorized, non-repudiable
     # operator decisions.
     operator_registry_path: str = ""
+    # Directory the default state files live in (KRONAGENT_STATE_DIR). Empty
+    # means the working directory. The container sets it to its volume, so the
+    # audit chain, approvals, allowlist and halt state survive a restart; an
+    # explicit KRONAGENT_*_PATH still wins over it.
+    state_dir: str = ""
     db_path: str = ""
     max_workers: int = 1
     kms_key_id: str = ""
@@ -229,7 +234,12 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        approval_path = os.getenv("KRONAGENT_APPROVAL_PATH", "kronagent_approvals.json")
+        state_dir = os.getenv("KRONAGENT_STATE_DIR", "")
+
+        def state(name: str) -> str:
+            return os.path.join(state_dir, name) if state_dir else name
+
+        approval_path = os.getenv("KRONAGENT_APPROVAL_PATH", state("kronagent_approvals.json"))
         db_path = os.getenv("KRONAGENT_DB_PATH", "")
         if not db_path and approval_path.endswith(".db"):
             db_path = approval_path
@@ -268,13 +278,14 @@ class Settings:
             azure_quarantine_nsg_id=os.getenv("KRONAGENT_AZURE_QUARANTINE_NSG_ID", ""),
             onprem_control_plane_url=os.getenv("KRONAGENT_ONPREM_CONTROL_PLANE_URL", ""),
             onprem_quarantine_vlan=os.getenv("KRONAGENT_ONPREM_QUARANTINE_VLAN", ""),
-            audit_log_path=os.getenv("KRONAGENT_AUDIT_PATH", "kronagent_audit.jsonl"),
+            audit_log_path=os.getenv("KRONAGENT_AUDIT_PATH", state("kronagent_audit.jsonl")),
             approval_store_path=approval_path,
-            outcome_store_path=os.getenv("KRONAGENT_OUTCOME_PATH", "kronagent_outcomes.json"),
-            allowlist_store_path=os.getenv("KRONAGENT_ALLOWLIST_PATH", "kronagent_allowlist.json"),
+            outcome_store_path=os.getenv("KRONAGENT_OUTCOME_PATH", state("kronagent_outcomes.json")),
+            allowlist_store_path=os.getenv("KRONAGENT_ALLOWLIST_PATH", state("kronagent_allowlist.json")),
             allowlist_warn_within=os.getenv("KRONAGENT_ALLOWLIST_WARN_WITHIN", "14d"),
-            connection_store_path=os.getenv("KRONAGENT_CONNECTION_PATH", "kronagent_connections.json"),
+            connection_store_path=os.getenv("KRONAGENT_CONNECTION_PATH", state("kronagent_connections.json")),
             operator_registry_path=os.getenv("KRONAGENT_OPERATOR_REGISTRY", ""),
+            state_dir=state_dir,
             db_path=db_path,
             max_workers=int(os.getenv("KRONAGENT_MAX_WORKERS", "1")),
             kms_key_id=os.getenv("KRONAGENT_KMS_KEY_ID", ""),
@@ -282,7 +293,7 @@ class Settings:
             require_view_auth=_env_bool("KRONAGENT_REQUIRE_VIEW_AUTH", False),
             trajectory_guard_enabled=_env_bool("KRONAGENT_TRAJECTORY_GUARD", True),
             trajectory_state_path=os.getenv(
-                "KRONAGENT_TRAJECTORY_STATE_PATH", "kronagent_trajectory_halt.json"),
+                "KRONAGENT_TRAJECTORY_STATE_PATH", state("kronagent_trajectory_halt.json")),
             trajectory_window_seconds=float(os.getenv("KRONAGENT_TRAJECTORY_WINDOW_SECONDS", "60")),
             trajectory_max_auto_executions=int(os.getenv("KRONAGENT_TRAJECTORY_MAX_AUTO", "25")),
             trajectory_max_scope_violations=int(os.getenv("KRONAGENT_TRAJECTORY_MAX_SCOPE_VIOLATIONS", "3")),

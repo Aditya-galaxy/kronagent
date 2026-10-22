@@ -306,6 +306,15 @@ Then open the console:
 python3 run_console.py          # http://127.0.0.1:8000
 ```
 
+Or run the agent loop and the console as one process, which is what the
+container does. It ingests from live sources only, unless you ask it to
+replay the samples. State goes to `KRONAGENT_STATE_DIR` when it's set
+(`/var/lib/kronagent` in the image):
+
+```bash
+python3 run_serve.py --replay   # replay the samples, then keep the console up
+```
+
 ```bash
 python3 approve.py list         # the actions waiting for a human
 python3 promote.py list         # the auto-execute allowlist (empty on a cold start)
@@ -642,6 +651,7 @@ approve.py             human approval CLI (incl. `stats` — oversight health)
 halt.py                kill-switch CLI (status / engage / clear a halt)
 operators.py           operator registry admin CLI (identity bootstrap)
 run_console.py         analyst web console server
+run_serve.py           agent loop + console in one process (the container's command)
 run_eval.py            measured evaluation harness
 run_siem_export.py     OCSF SIEM exporter
 run_cloud_drill.py     cloud containment chaos/rollback drill

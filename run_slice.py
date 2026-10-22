@@ -87,6 +87,14 @@ async def _replay_files(sources, queue, stop) -> None:
             return
 
 
+def live_source_configured(settings: Settings) -> bool:
+    """Whether main() would ingest from a live source rather than replay files:
+    a HEALTHY cloud connection, or an SQS queue. Mirrors the selection below."""
+    healthy = any(c.state == ConnectionState.HEALTHY
+                  for c in ConnectionStore(settings.connection_store_path).list())
+    return healthy or bool(os.getenv("KRONAGENT_SQS_QUEUE_URL"))
+
+
 async def main(replay: list[tuple[str, str]]) -> int:
     settings = Settings.from_env()
 
