@@ -48,7 +48,7 @@ from .connect import _cfn_parameterize, _contain_policy, _observe_policy
 
 # The image the stack runs by default. Pinned to a version, never `latest`:
 # what a customer installed must not change under them on a task restart.
-DEFAULT_IMAGE = "ghcr.io/aditya-galaxy/kronagent:0.2.0"
+DEFAULT_IMAGE = "ghcr.io/aditya-galaxy/kronagent:0.2.1"
 DEFAULT_BEDROCK_MODEL = "anthropic.claude-opus-5-5"
 STATE_DIR = "/var/lib/kronagent"
 APP_UID = "10001"            # the image's non-root user
