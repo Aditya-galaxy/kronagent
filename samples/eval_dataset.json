@@ -3,7 +3,7 @@
     "finding_id": "eval-aws-attack-0001",
     "provider": "aws",
     "expected_actionable": true,
-    "description": "IAM Access Key credential exfiltration from external IP (Tor exit node). Should plan disabling access key, detaching user permissions, and blocking IP.",
+    "description": "Instance role credentials (temporary, ASIA) used from a Tor exit node. Should revoke the role's sessions and block the IP; a temporary key cannot be deactivated, and the role is not an IAM user.",
     "raw_event": {
       "SchemaVersion": "2.0",
       "AccountId": "123456789012",
@@ -40,9 +40,8 @@
       }
     },
     "expected_action_classes": [
-      "attach_deny_all_to_principal",
       "block_ip",
-      "disable_access_key"
+      "revoke_role_sessions"
     ]
   },
   {
@@ -116,7 +115,7 @@
     "finding_id": "eval-aws-attack-0004",
     "provider": "aws",
     "expected_actionable": true,
-    "description": "Anomalous large exfiltration behavior to an unauthorized host. Should block the IP.",
+    "description": "Anomalous large exfiltration by an assumed role's temporary credentials. Should revoke the role's sessions and block the IP.",
     "raw_event": {
       "SchemaVersion": "2.0",
       "AccountId": "123456789012",
@@ -130,7 +129,8 @@
         "ResourceType": "AccessKey",
         "AccessKeyDetails": {
           "AccessKeyId": "ASIAEXAMPLEEXFIL02",
-          "UserName": "data-sync"
+          "UserName": "data-sync",
+          "UserType": "AssumedRole"
         }
       },
       "Service": {
@@ -149,9 +149,8 @@
       }
     },
     "expected_action_classes": [
-      "attach_deny_all_to_principal",
       "block_ip",
-      "disable_access_key"
+      "revoke_role_sessions"
     ]
   },
   {
@@ -1070,9 +1069,8 @@
       }
     },
     "expected_action_classes": [
-      "attach_deny_all_to_principal",
       "block_ip",
-      "disable_access_key"
+      "revoke_role_sessions"
     ]
   },
   {

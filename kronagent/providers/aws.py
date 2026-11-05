@@ -122,6 +122,58 @@ class GuardDutyFinding(BaseModel):
 # Normalization: GuardDuty dict -> provider-neutral Finding
 # --------------------------------------------------------------------------- #
 
+def _credential_resources(akd: AccessKey) -> list[ResourceRef]:
+    """What a credential finding actually implicates, by kind of credential.
+
+    The kind decides the containment, so it has to match what AWS can act on:
+
+      * A long-term key (AKIA…) belongs to an IAM user. It can be deactivated,
+        and the user can be denied.
+      * A temporary key (ASIA…) comes from STS. It cannot be deactivated; there
+        is no key to switch off. For an assumed role, GuardDuty's UserName is the
+        role, and the sessions are cut by a deny on tokens issued before now.
+        Stolen session tokens (instance credential exfiltration, a developer's
+        hijacked session) are this case.
+      * Root, federated users, or a temporary key whose principal type isn't
+        stated get no principal resource, and a root key is never a target
+        (only root can manage it): there is nothing safe to target, and
+        guessing would aim containment at whatever IAM user happens to share
+        the name.
+
+    The key itself is always kept as evidence, so triage and forensics see it.
+    """
+    out: list[ResourceRef] = []
+    key = akd.AccessKeyId or ""
+    user_type = (akd.UserType or "").strip()
+    name = akd.UserName or ""
+    temporary = key.startswith("ASIA")
+    principal_id = (akd.model_extra or {}).get("PrincipalId") or ""
+
+    if key:
+        # A root key can only be managed by root itself, so it is evidence,
+        # never a target, exactly like a temporary key.
+        if temporary:
+            kind = "aws.sts.temporary_credentials"
+        elif user_type == "Root":
+            kind = "aws.iam.root_access_key"
+        else:
+            kind = "aws.iam.access_key"
+        out.append(ResourceRef(
+            kind=kind,
+            id=key,
+            attributes={"user_name": name, "user_type": user_type,
+                        **({"principal_id": principal_id} if principal_id else {})},
+        ))
+    if not name:
+        return out
+    if user_type == "AssumedRole":
+        out.append(ResourceRef(kind="aws.iam.role", id=name,
+                               attributes={"access_key_id": key} if key else {}))
+    elif user_type == "IAMUser" or (not user_type and key.startswith("AKIA")):
+        out.append(ResourceRef(kind="aws.iam.user", id=name, attributes={}))
+    return out
+
+
 def normalize_guardduty(payload: dict) -> Finding:
     gd = GuardDutyFinding.model_validate(payload)
     resources: list[ResourceRef] = []
@@ -129,16 +181,7 @@ def normalize_guardduty(payload: dict) -> Finding:
     rtype = (res.ResourceType or "").lower()
 
     if rtype == "accesskey" and res.AccessKeyDetails:
-        akd = res.AccessKeyDetails
-        if akd.AccessKeyId:
-            resources.append(ResourceRef(
-                kind="aws.iam.access_key", id=akd.AccessKeyId,
-                attributes={"user_name": akd.UserName or ""},
-            ))
-        if akd.UserName:
-            resources.append(ResourceRef(
-                kind="aws.iam.user", id=akd.UserName, attributes={},
-            ))
+        resources.extend(_credential_resources(res.AccessKeyDetails))
     elif rtype == "instance" and res.InstanceDetails and res.InstanceDetails.InstanceId:
         resources.append(ResourceRef(
             kind="aws.ec2.instance", id=res.InstanceDetails.InstanceId, attributes={},
@@ -172,6 +215,14 @@ def plan_aws_actions(finding: Finding) -> list[ProposedAction]:
                 target=r.id,
                 rationale="Deactivate the compromised access key to stop credential abuse.",
                 parameters={"user_name": r.attributes.get("user_name", "")},
+            ))
+        elif r.kind == "aws.iam.role":
+            actions.append(ProposedAction(
+                provider=PROVIDER, action_class=ActionClass.REVOKE_ROLE_SESSIONS,
+                target=r.id,
+                rationale="Cut every session of this role issued before now. The stolen "
+                          "temporary credentials stop working; the role itself is untouched "
+                          "and can issue new sessions.",
             ))
         elif r.kind == "aws.iam.user":
             actions.append(ProposedAction(

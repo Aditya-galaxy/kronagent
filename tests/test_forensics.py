@@ -224,3 +224,21 @@ def test_evidence_item_custody_verification() -> None:
     item_tampered = item.model_copy(update={"target": "i-tampered"})
     assert item_tampered.verify_custody() is False
 
+
+
+def test_stolen_session_evidence_traces_the_key_and_snapshots_the_role() -> None:
+    """Temporary credentials are traced by key in CloudTrail, and the role's
+    policies are captured before revoking its sessions changes them."""
+    from kronagent.forensics import _plan_aws_evidence
+    finding = Finding(
+        provider="aws", finding_id="f-sess", finding_type="UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS",
+        severity=8.0,
+        resources=[
+            ResourceRef(kind="aws.sts.temporary_credentials", id="ASIA1", attributes={"user_name": "svc-backup"}),
+            ResourceRef(kind="aws.iam.role", id="svc-backup"),
+        ],
+    )
+    items = _plan_aws_evidence(finding)
+    assert any("AccessKeyId='ASIA1'" in c for i in items for c in i.collection_calls)
+    assert any(i.kind == "aws.iam.role.state" and i.target == "svc-backup" for i in items)
+    assert all(i.read_only for i in items)

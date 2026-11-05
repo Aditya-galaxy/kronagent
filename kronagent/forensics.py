@@ -157,6 +157,23 @@ def _plan_aws_evidence(finding: Finding) -> list[EvidenceItem]:
                 description=f"Recent CloudTrail activity for principal {principal}.",
                 collection_calls=[f"cloudtrail.lookup_events(LookupAttributes=[Username='{principal}'])"],
             ))
+        elif r.kind in ("aws.sts.temporary_credentials", "aws.iam.root_access_key"):
+            # Temporary credentials are traced by key, not by name: CloudTrail
+            # records the session name, which an attacker using stolen tokens
+            # does not choose and a defender rarely knows.
+            items.append(EvidenceItem(
+                kind="aws.cloudtrail.history", target=r.id, read_only=True,
+                description=f"Every CloudTrail call made with access key {r.id}.",
+                collection_calls=[f"cloudtrail.lookup_events(LookupAttributes=[AccessKeyId='{r.id}'])"],
+            ))
+        elif r.kind == "aws.iam.role":
+            items.append(EvidenceItem(
+                kind="aws.iam.role.state", target=r.id, read_only=True,
+                description="The role's trust and permission policies before containment changes them.",
+                collection_calls=[f"iam.get_role(RoleName='{r.id}')",
+                                  f"iam.list_role_policies(RoleName='{r.id}')",
+                                  f"iam.list_attached_role_policies(RoleName='{r.id}')"],
+            ))
     return items
 
 

@@ -30,11 +30,13 @@ def test_normalize_guardduty_access_key(guardduty_findings) -> None:
     assert finding.finding_id == "kronagent-finding-cred-exfil-0001"
     assert finding.severity == 8.0
     assert finding.remote_ip == "185.220.101.7"
+    # Instance credentials are temporary (ASIA) and belong to a role, not a user.
     kinds = {r.kind for r in finding.resources}
-    assert kinds == {"aws.iam.access_key", "aws.iam.user"}
-    key_res = next(r for r in finding.resources if r.kind == "aws.iam.access_key")
+    assert kinds == {"aws.sts.temporary_credentials", "aws.iam.role"}
+    key_res = next(r for r in finding.resources if r.kind == "aws.sts.temporary_credentials")
     assert key_res.id == "ASIAEXAMPLECREDEXFIL"
     assert key_res.attributes["user_name"] == "svc-backup"
+    assert next(r for r in finding.resources if r.kind == "aws.iam.role").id == "svc-backup"
 
 
 def test_normalize_guardduty_instance(guardduty_findings) -> None:
@@ -44,20 +46,57 @@ def test_normalize_guardduty_instance(guardduty_findings) -> None:
     assert finding.resources[0].id == "i-0a1b2c3d4e5f60789"
 
 
-def test_plan_aws_actions_access_key_targets_the_real_key(guardduty_findings) -> None:
+def test_stolen_role_credentials_revoke_the_roles_sessions(guardduty_findings) -> None:
+    """A temporary key cannot be deactivated and a role is not a user: the
+    containment that works is denying every session issued before now."""
     finding = normalize_guardduty(guardduty_findings[0])
     actions = plan_aws_actions(finding)
+    classes = {a.action_class for a in actions}
 
-    key_actions = [a for a in actions if a.action_class == ActionClass.DISABLE_ACCESS_KEY]
-    assert len(key_actions) == 1
-    assert key_actions[0].target == "ASIAEXAMPLECREDEXFIL"  # from the finding, not invented
-    assert key_actions[0].provider == "aws"
-
-    deny_actions = [a for a in actions if a.action_class == ActionClass.ATTACH_DENY_ALL_TO_PRINCIPAL]
-    assert deny_actions[0].target == "svc-backup"
+    assert ActionClass.DISABLE_ACCESS_KEY not in classes
+    assert ActionClass.ATTACH_DENY_ALL_TO_PRINCIPAL not in classes
+    revoke = [a for a in actions if a.action_class == ActionClass.REVOKE_ROLE_SESSIONS]
+    assert [a.target for a in revoke] == ["svc-backup"]   # from the finding, not invented
+    assert revoke[0].provider == "aws"
 
     block_actions = [a for a in actions if a.action_class == ActionClass.BLOCK_IP]
     assert block_actions[0].target == "185.220.101.7"
+
+
+def _key_finding(key: str, user: str, user_type: str | None) -> dict:
+    details = {"AccessKeyId": key, "UserName": user}
+    if user_type is not None:
+        details["UserType"] = user_type
+    return {"Id": "f-key", "Type": "UnauthorizedAccess:IAMUser/MaliciousIPCaller.Custom", "Severity": 8.0,
+            "Resource": {"ResourceType": "AccessKey", "AccessKeyDetails": details}}
+
+
+def _planned(raw: dict) -> list[tuple[str, str]]:
+    return sorted((a.action_class.value, a.target) for a in plan_aws_actions(normalize_guardduty(raw)))
+
+
+def test_a_long_term_user_key_is_disabled_and_the_user_denied() -> None:
+    assert _planned(_key_finding("AKIAEXAMPLE1", "alice", "IAMUser")) == [
+        ("attach_deny_all_to_principal", "alice"), ("disable_access_key", "AKIAEXAMPLE1")]
+
+
+def test_a_users_session_token_denies_the_user_but_disables_nothing() -> None:
+    """GetSessionToken credentials are temporary but belong to an IAM user."""
+    assert _planned(_key_finding("ASIAEXAMPLE2", "alice", "IAMUser")) == [
+        ("attach_deny_all_to_principal", "alice")]
+
+
+def test_no_principal_action_when_the_principal_is_unknown() -> None:
+    """Guessing would deny whatever IAM user happens to share the name."""
+    assert _planned(_key_finding("ASIAEXAMPLE3", "data-sync", None)) == []
+    assert _planned(_key_finding("ASIAEXAMPLE4", "web-federated", "FederatedUser")) == []
+    assert _planned(_key_finding("AKIAEXAMPLE5", "root", "Root")) == []
+
+
+def test_no_plan_ever_disables_a_temporary_key() -> None:
+    for user_type in ("IAMUser", "AssumedRole", "FederatedUser", "Root", None):
+        planned = _planned(_key_finding("ASIAEXAMPLE6", "x", user_type))
+        assert not any(cls == "disable_access_key" for cls, _ in planned), user_type
 
 
 def test_plan_aws_actions_instance_targets_the_real_instance(guardduty_findings) -> None:
