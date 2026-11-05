@@ -17,20 +17,23 @@ All three run today against replayed real-schema findings in
 **Finding:** `UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS`
 — instance credentials are being used from outside AWS.
 
-**By hand.** You wake up. Work out which key. Disable it in IAM. Then remember
-that disabling a key does not kill sessions already issued from it, so revoke
-those too. Then open CloudTrail and reconstruct what the key touched while you
-were asleep.
+**By hand.** You wake up. Work out which credentials. Instance credentials are
+temporary (their key starts `ASIA`) and belong to the instance's role, so there
+is no key to disable in IAM. What works is denying every session the role issued
+before now. Then open CloudTrail, look up everything that key ID touched while
+you were asleep, and block the address it came from.
 
 **With Kronagent.** Triage confirms a real credential compromise; threat intel
-maps it to ATT&CK T1078. Two actions follow — `disable_access_key` and
-`revoke_role_sessions` — and the CloudTrail narrative of what the principal
-touched is assembled into the incident record while that happens.
+maps it to ATT&CK T1078. Two actions follow: `revoke_role_sessions` on the
+instance's role and `block_ip` on the caller. Forensics captures the role's
+policies before they change, and every CloudTrail call made with the stolen key.
+For a long-term user key (`AKIA…`) the plan is different and fits it:
+`disable_access_key` and a deny-all on that user.
 
-**Where it stops.** Both actions are reversible and scoped to a single
-principal, so both are eligible for auto-execute once an operator has promoted
-them. Nothing else in the account is touched. Before promotion, both route to
-`approve.py` and wait.
+**Where it stops.** Revoking sessions also ends the role's legitimate sessions,
+so it is classed destructive and always waits for a person in `approve.py`,
+promoted or not. Blocking the IP is reversible and scoped, so an operator can
+promote it to run unattended. Nothing else in the account is touched.
 
 ---
 
