@@ -61,7 +61,7 @@ Take the template from the release you're installing, so the template and
 the image match:
 
 ```bash
-VERSION=0.2.0
+VERSION=0.2.1
 curl -fsSLO "https://raw.githubusercontent.com/Aditya-galaxy/kronagent/v${VERSION}/deploy/cloudformation/kronagent-in-account.json"
 
 aws cloudformation deploy \

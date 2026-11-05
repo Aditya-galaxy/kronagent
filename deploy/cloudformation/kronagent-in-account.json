@@ -55,7 +55,7 @@
     },
     "ImageUri": {
       "Type": "String",
-      "Default": "ghcr.io/aditya-galaxy/kronagent:0.2.0",
+      "Default": "ghcr.io/aditya-galaxy/kronagent:0.2.1",
       "Description": "Kronagent container image. Pin a version."
     },
     "LogRetentionDays": {
